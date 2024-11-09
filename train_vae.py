@@ -105,6 +105,8 @@ class VAETrainer:
             self.vae, self.optimizer, self.scheduler
         )           
 
+        self.vae = torch.compile(self.vae)
+
     def training_step(self, frames):
         """Single training step"""
         # Forward pass
@@ -310,14 +312,18 @@ def main():
     train_loader = DataLoader(
         ImageDataset(split="train", return_actions=False),
         batch_size=config.batch_size,
-        num_workers=0,
+        num_workers=os.cpu_count(),
+        prefetch_factor=2,
+        persistent_workers=True,
         pin_memory=True,
     )
 
     val_loader = DataLoader(
         ImageDataset(split="validation", return_actions=False),
-        batch_size=config.batch_size,
-        num_workers=0,
+        batch_size=config.validation_batch_size,
+        num_workers=os.cpu_count(),
+        prefetch_factor=2,
+        persistent_workers=True,
         pin_memory=True,
     )
 

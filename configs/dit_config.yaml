@@ -1,5 +1,5 @@
-vae_checkpoint: checkpoints/vae_epoch_1_100.pt
-learning_rate: 1e-4
+vae_checkpoint: checkpoints/vit-l-20.pt
+learning_rate: 1e-5
 min_learning_rate: 1e-6
 warnup_ratio: 0.03
 weight_decay: 0.01
@@ -9,10 +9,10 @@ validation_batch_size: 8
 
 num_epochs: 5
 max_steps: -1  
-validation_steps: 10000
-save_every: 10000
+validation_steps: 2000
+save_every: 2000
 output_dir: checkpoints
-logging_steps: 4
+logging_steps: 5
 
 seed: 42
 use_wandb: true

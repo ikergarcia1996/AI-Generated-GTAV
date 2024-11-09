@@ -2,11 +2,11 @@
 #SBATCH --account=hitz-exclusive
 #SBATCH --partition=hitz-exclusive
 #SBATCH --job-name=DIT_train
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=32
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
 #SBATCH --constraint=a100
-#SBATCH --mem=80G
+#SBATCH --mem=300G
 #SBATCH --output=.slurm/DIT_train.out.txt
 #SBATCH --error=.slurm/DIT_train.err.txt
 

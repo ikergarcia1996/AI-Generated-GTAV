@@ -1,5 +1,6 @@
 import glob
 import os
+from typing import List
 
 import torch
 import torch.multiprocessing
@@ -8,7 +9,6 @@ from einops import rearrange
 from huggingface_hub import HfFileSystem, get_token, hf_hub_url
 from torch.utils.data import IterableDataset
 from torchvision import transforms
-from typing import List
 
 
 def count_examples(dataset_dir: str) -> int:
@@ -108,8 +108,10 @@ class ImageDataset(IterableDataset):
         ]
 
         # Join URLs with double colon and add curl command
+
         urls = (
-            f"pipe:curl -s -L -H 'Authorization:Bearer {get_token()}' {'::'.join(urls)}"
+            f"pipe:curl -s -L --retry 3 --retry-delay 1 --retry-all-errors "
+            f"-H 'Authorization:Bearer {get_token()}' {'::'.join(urls)}"
         )
 
         transform = transforms.Compose(
@@ -118,7 +120,15 @@ class ImageDataset(IterableDataset):
 
         # Create WebDataset with proper image decoding
         self.dataset = (
-            wds.WebDataset(urls, handler=wds.warn_and_continue)
+            wds.WebDataset(
+                urls,
+                handler=wds.warn_and_continue,
+                shardshuffle=True,
+                nodesplitter=wds.shardlists.split_by_worker,
+                empty_check=False,
+                resampled=True,
+            )
+            .shuffle(1000)  # Add shuffle buffer
             .decode("pil")  # Decode as PIL Image
             .to_tuple("jpg", "cls")
             .map(lambda x: (transform(x[0]), x[1]))  # Apply transforms to image only
