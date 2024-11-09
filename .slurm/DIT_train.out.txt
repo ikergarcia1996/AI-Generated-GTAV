@@ -1,6 +1,6 @@
 CUDA_VISIBLE_DEVICES 0,1,2,3
-Using HFDataset. This will load the dataset into memory. Is faster, but requires A LOT of RAM.Using HFDataset. This will load the dataset into memory. Is faster, but requires A LOT of RAM.
-
+Using HFDataset. This will load the dataset into memory. Is faster, but requires A LOT of RAM.
+Using HFDataset. This will load the dataset into memory. Is faster, but requires A LOT of RAM.
 Using HFDataset. This will load the dataset into memory. Is faster, but requires A LOT of RAM.
 Using HFDataset. This will load the dataset into memory. Is faster, but requires A LOT of RAM.
 Loaded dataset for train split with 1270669 examples
@@ -11,24 +11,20 @@ Loaded dataset for validation split with 4038 examples
 Loaded dataset for validation split with 4038 examples
 Loaded dataset for validation split with 4038 examples
 Loaded dataset for validation split with 4038 examples
-[GPU 0/4] Frames shape: torch.Size([32, 5, 3, 360, 640])
-[GPU 2/4] Frames shape: torch.Size([32, 5, 3, 360, 640])
-[GPU 0/4] Frame values - Min: 0.000, Max: 1.000, Mean: 0.129
 [GPU 1/4] Frames shape: torch.Size([32, 5, 3, 360, 640])
 [GPU 1/4] Frame values - Min: 0.000, Max: 1.000, Mean: 0.171
-[GPU 2/4] Frame values - Min: 0.000, Max: 1.000, Mean: 0.185
 [GPU 3/4] Frames shape: torch.Size([32, 5, 3, 360, 640])
 [GPU 3/4] Frame values - Min: 0.000, Max: 1.000, Mean: 0.172
-Saving checkpoint at epoch 1 and step 10 to checkpoints
-[2024-11-09 18:17:30,720] [INFO] [real_accelerator.py:203:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+[GPU 2/4] Frames shape: torch.Size([32, 5, 3, 360, 640])
+[GPU 2/4] Frame values - Min: 0.000, Max: 1.000, Mean: 0.185
+[GPU 0/4] Frames shape: torch.Size([32, 5, 3, 360, 640])
+[GPU 0/4] Frame values - Min: 0.000, Max: 1.000, Mean: 0.129
+Saving checkpoint at epoch 1 and step 2000 to checkpoints
+[2024-11-09 20:13:49,776] [INFO] [real_accelerator.py:203:get_accelerator] Setting ds_accelerator to cuda (auto detect)
 [93m [WARNING] [0m async_io requires the dev libaio .so object and headers but these were not found.
 [93m [WARNING] [0m async_io: please install the libaio-devel package with yum
 [93m [WARNING] [0m If libaio is already installed (perhaps from source), try setting the CFLAGS and LDFLAGS environment variables to where it can be found.
 [93m [WARNING] [0m Please specify the CUTLASS repo directory as environment variable $CUTLASS_PATH
 [93m [WARNING] [0m sparse_attn requires a torch version >= 1.5 and < 2.0 but detected 2.4
 [93m [WARNING] [0m using untested triton version (3.0.0), only 1.0.0 is known to be compatible
-Saving checkpoint at epoch 1 and step 10 to checkpoints
-Saving checkpoint at epoch 1 and step 20 to checkpoints
-Saving checkpoint at epoch 1 and step 20 to checkpoints
-Saving checkpoint at epoch 1 and step 30 to checkpoints
-Saving checkpoint at epoch 1 and step 30 to checkpoints
+Saving checkpoint at epoch 1 and step 2000 to checkpoints

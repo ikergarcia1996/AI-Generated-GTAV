@@ -152,6 +152,11 @@ class VAETrainer:
         # Total loss
         loss = recon_loss + self.config.kl_weight * kl_loss
 
+        # Scale loss by gradient accumulation steps
+        loss = loss / self.config.gradient_accumulation_steps
+        recon_loss = recon_loss / self.config.gradient_accumulation_steps
+        kl_loss = kl_loss / self.config.gradient_accumulation_steps
+
         # Backward pass
         self.accelerator.backward(loss)
 
@@ -250,6 +255,7 @@ class VAETrainer:
             global_step = 0
             for epoch in range(self.config.num_epochs):
                 epoch_losses = []
+                accumulated_loss_dict = {"loss": 0.0, "recon_loss": 0.0, "kl_loss": 0.0}
 
                 for step, batch in enumerate(train_loader):
                     if (
@@ -270,69 +276,90 @@ class VAETrainer:
 
                     # Training step
                     loss_dict = self.training_step(frames)
-                    epoch_losses.append(loss_dict["loss"])
 
-                    # Update weights
+                    # Accumulate losses
+                    for k, v in loss_dict.items():
+                        accumulated_loss_dict[k] += v.item()
+
+                    # Update weights and log
                     if (step + 1) % self.config.gradient_accumulation_steps == 0:
+                        # Average the accumulated losses
+                        avg_loss_dict = {
+                            k: v / self.config.gradient_accumulation_steps
+                            for k, v in accumulated_loss_dict.items()
+                        }
+                        epoch_losses.append(avg_loss_dict["loss"])
+
                         self.accelerator.clip_grad_norm_(
                             self.dit.parameters(), self.config.max_grad_norm
                         )
                         self.optimizer.step()
-                        self.scheduler.step()  # Update learning rate
+                        self.scheduler.step()
                         self.optimizer.zero_grad()
                         progress_bar.update(1)
                         global_step += 1
 
-                    # Logging
-                    if self.accelerator.is_main_process:
-                        progress_bar.set_description(
-                            f"Epoch {epoch+1} Loss: {sum(epoch_losses) / len(epoch_losses):.4f}"
-                        )
-
+                        # Logging
                         if (
                             self.config.use_wandb
                             and global_step % self.config.logging_steps == 0
                         ):
-                            # Get current learning rate
                             current_lr = self.scheduler.get_last_lr()[0]
                             wandb.log(
                                 {
-                                    "train_loss": loss_dict["loss"],
-                                    "recon_loss": loss_dict["recon_loss"],
-                                    "kl_loss": loss_dict["kl_loss"],
-                                    "learning_rate": current_lr,  # Log learning rate
+                                    "train_loss": avg_loss_dict["loss"],
+                                    "recon_loss": avg_loss_dict["recon_loss"],
+                                    "kl_loss": avg_loss_dict["kl_loss"],
+                                    "learning_rate": current_lr,
                                     "epoch": epoch,
                                     "step": global_step,
                                 }
                             )
 
-                    # Run validation
-                    if (
-                        global_step > 0
-                        and global_step % self.config.validation_steps == 0
-                    ):
-                        val_losses = self.validation(val_loader)
-
-                        # Calculate average validation metrics
-                        avg_val_metrics = {
-                            k: sum(d[k] for d in val_losses) / len(val_losses)
-                            for k in val_losses[0].keys()
+                        # Reset accumulated losses
+                        accumulated_loss_dict = {
+                            "loss": 0.0,
+                            "recon_loss": 0.0,
+                            "kl_loss": 0.0,
                         }
 
-                        if self.accelerator.is_main_process and self.config.use_wandb:
-                            wandb.log(
-                                {
-                                    "val_loss": avg_val_metrics["loss"],
-                                    "val_recon_loss": avg_val_metrics["recon_loss"],
-                                    "val_kl_loss": avg_val_metrics["kl_loss"],
-                                    "epoch": epoch,
-                                    "step": global_step,
-                                }
-                            )
+                        progress_bar.set_description(
+                            f"Epoch {epoch+1} Loss: {sum(epoch_losses) / len(epoch_losses):.4f}"
+                        )
 
-                    # Save checkpoint
-                    if global_step > 0 and global_step % self.config.save_every == 0:
-                        self.save_checkpoint(epoch, global_step)
+                        # Run validation
+                        if (
+                            global_step > 0
+                            and global_step % self.config.validation_steps == 0
+                        ):
+                            val_losses = self.validation(val_loader)
+
+                            # Calculate average validation metrics
+                            avg_val_metrics = {
+                                k: sum(d[k] for d in val_losses) / len(val_losses)
+                                for k in val_losses[0].keys()
+                            }
+
+                            if (
+                                self.accelerator.is_main_process
+                                and self.config.use_wandb
+                            ):
+                                wandb.log(
+                                    {
+                                        "val_loss": avg_val_metrics["loss"],
+                                        "val_recon_loss": avg_val_metrics["recon_loss"],
+                                        "val_kl_loss": avg_val_metrics["kl_loss"],
+                                        "epoch": epoch,
+                                        "step": global_step,
+                                    }
+                                )
+
+                        # Save checkpoint
+                        if (
+                            global_step > 0
+                            and global_step % self.config.save_every == 0
+                        ):
+                            self.save_checkpoint(epoch, global_step)
 
 
 def main():

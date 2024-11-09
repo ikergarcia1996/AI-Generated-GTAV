@@ -501,8 +501,7 @@ class DiffusionTrainer:
             global_step = 0
 
             for epoch in range(self.config.num_epochs):
-                epoch_losses = []
-
+                accumulated_loss = 0.0  # Add accumulator
                 for step, batch in enumerate(train_loader):
                     if (
                         self.config.max_steps > 0
@@ -516,10 +515,16 @@ class DiffusionTrainer:
                         actions = None
 
                     loss = self.training_step(frames, actions)
-                    epoch_losses.append(loss)
+                    accumulated_loss += loss  # Accumulate loss
 
                     # Update weights after gradient accumulation steps
                     if (step + 1) % self.config.gradient_accumulation_steps == 0:
+                        # Calculate average loss over accumulation steps
+                        avg_loss = (
+                            accumulated_loss / self.config.gradient_accumulation_steps
+                        )
+                        accumulated_loss = 0.0  # Reset accumulator
+
                         self.accelerator.clip_grad_norm_(
                             self.dit.parameters(), self.config.max_grad_norm
                         )
@@ -529,41 +534,47 @@ class DiffusionTrainer:
                         progress_bar.update(1)
                         global_step += 1
 
-                    if self.accelerator.is_main_process:
+                        if self.accelerator.is_main_process:
+                            if (
+                                self.config.use_wandb
+                                and global_step % self.config.logging_steps == 0
+                            ):
+                                current_lr = self.scheduler.get_last_lr()[0]
+                                wandb.log(
+                                    {
+                                        "train_loss": avg_loss,  # Use averaged loss
+                                        "learning_rate": current_lr,
+                                        "epoch": epoch,
+                                        "step": global_step,
+                                    }
+                                )
                         if (
-                            self.config.use_wandb
-                            and global_step % self.config.logging_steps == 0
+                            global_step > 0
+                            and global_step % self.config.validation_steps == 0
                         ):
-                            current_lr = self.scheduler.get_last_lr()[0]
-                            wandb.log(
-                                {
-                                    "train_loss": loss,
-                                    "learning_rate": current_lr,
-                                    "epoch": epoch,
-                                    "step": global_step,
-                                }
-                            )
-                    if (
-                        global_step > 0
-                        and global_step % self.config.validation_steps == 0
-                    ):
-                        val_losses = self.validation(val_loader)
-                        avg_val_loss = sum(d["loss"] for d in val_losses) / len(
-                            val_losses
-                        )
-
-                        if self.accelerator.is_main_process and self.config.use_wandb:
-                            wandb.log(
-                                {
-                                    "val_loss": avg_val_loss,
-                                    "epoch": epoch,
-                                    "step": global_step,
-                                }
+                            val_losses = self.validation(val_loader)
+                            avg_val_loss = sum(d["loss"] for d in val_losses) / len(
+                                val_losses
                             )
 
-                    # Save checkpoint
-                    if global_step > 0 and global_step % self.config.save_every == 0:
-                        self.save_checkpoint(epoch, global_step)
+                            if (
+                                self.accelerator.is_main_process
+                                and self.config.use_wandb
+                            ):
+                                wandb.log(
+                                    {
+                                        "val_loss": avg_val_loss,
+                                        "epoch": epoch,
+                                        "step": global_step,
+                                    }
+                                )
+
+                        # Save checkpoint
+                        if (
+                            global_step > 0
+                            and global_step % self.config.save_every == 0
+                        ):
+                            self.save_checkpoint(epoch, global_step)
 
 
 def main():
