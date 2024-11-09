@@ -1,24 +1,27 @@
+import os
+from dataclasses import dataclass
+from typing import Literal
+
 import torch
 import torch.nn as nn
-from torch.optim import AdamW
-from torch.utils.data import DataLoader
+import yaml
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
+from einops import rearrange
+from torch.cuda.amp import autocast
+from torch.optim import AdamW
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers.optimization import get_cosine_with_min_lr_schedule_with_warmup
+
+import wandb
+from hf_dataset import ImageDataset as HfDataset
 from model.dit import DiT_models
 from model.vae import VAE_models
 from utils import sigmoid_beta_schedule
-from einops import rearrange
-from tqdm import tqdm
-import wandb
-import os
-from dataclasses import dataclass
-import yaml
-from dataset import ImageDataset, split_len
-from transformers.optimization import get_cosine_with_min_lr_schedule_with_warmup
-import webdataset as wds
-import torch._dynamo as dynamo
-from torch.cuda.amp import autocast
+from web_dataset import ImageDataset as WebDataset
+from web_dataset import split_len
 
 
 @dataclass
@@ -44,6 +47,7 @@ class TrainingConfig:
     logging_steps: int = 10
     use_action_conditioning: bool = True
     warnup_ratio: float = 0.1
+    dataset_type: Literal["webdataset", "hfdataset"] = "webdataset"
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":
@@ -101,7 +105,7 @@ class DiffusionTrainer:
         )
 
         # Calculate total steps for scheduler
-        total_dataset_size = split_len("train") * 5
+        total_dataset_size = split_len("train")
         self.steps_per_epoch = total_dataset_size // (
             config.batch_size
             * self.accelerator.num_processes
@@ -529,10 +533,20 @@ def main():
     config = TrainingConfig.from_yaml(args.config)
     trainer = DiffusionTrainer(config)
     # Setup data loading
+
+    if config.dataset_type == "webdataset":
+        ImageDataset = WebDataset
+    elif config.dataset_type == "hfdataset":
+        ImageDataset = HfDataset
+    else:
+        raise ValueError(
+            f"Invalid dataset type: {config.dataset_type}. Must be 'webdataset' or 'hfdataset'."
+        )
+
     train_loader = DataLoader(
         ImageDataset(split="train", return_actions=config.use_action_conditioning),
         batch_size=config.batch_size,
-        num_workers=os.cpu_count(),
+        num_workers=min(os.cpu_count(), 16),
         prefetch_factor=2,
         persistent_workers=True,
         pin_memory=True,
@@ -541,7 +555,7 @@ def main():
     val_loader = DataLoader(
         ImageDataset(split="validation", return_actions=config.use_action_conditioning),
         batch_size=config.validation_batch_size,
-        num_workers=os.cpu_count(),
+        num_workers=min(os.cpu_count(), 4),
         prefetch_factor=2,
         persistent_workers=True,
         pin_memory=True,

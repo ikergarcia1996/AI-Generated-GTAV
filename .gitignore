@@ -132,3 +132,8 @@ checkpoints/
 wandb/
 
 .slurm/
+
+*err.txt
+*out.txt
+.slurm/DIT_train.err.txt
+.slurm/DIT_train.out.txt

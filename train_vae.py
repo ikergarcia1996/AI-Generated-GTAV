@@ -3,7 +3,6 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-import wandb
 import yaml
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -12,10 +11,14 @@ from einops import rearrange
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-
-from dataset import ImageDataset, split_len
-from model.vae import VAE_models
 from transformers.optimization import get_cosine_with_min_lr_schedule_with_warmup
+
+import wandb
+from hf_dataset import ImageDataset as HfDataset
+from model.vae import VAE_models
+from web_dataset import ImageDataset as WebDataset
+from web_dataset import split_len
+
 
 @dataclass
 class VAETrainingConfig:
@@ -40,7 +43,7 @@ class VAETrainingConfig:
     def from_yaml(cls, yaml_path: str) -> "VAETrainingConfig":
         with open(yaml_path, "r") as f:
             config_dict = yaml.safe_load(f)
-        data =  cls(**config_dict)
+        data = cls(**config_dict)
         data.learning_rate = float(data.learning_rate)
         data.min_learning_rate = float(data.min_learning_rate)
         data.weight_decay = float(data.weight_decay)
@@ -88,7 +91,7 @@ class VAETrainer:
         if config.max_steps > 0:
             total_training_steps = min(total_training_steps, config.max_steps)
 
-        # Calculate warmup steps 
+        # Calculate warmup steps
         num_warmup_steps = int(self.config.warnup_ratio * total_training_steps)
 
         # Setup scheduler
@@ -97,13 +100,13 @@ class VAETrainer:
             num_warmup_steps=num_warmup_steps,
             num_training_steps=total_training_steps,
             num_cycles=0.5,  # Standard cosine decay
-            min_lr=self.config.min_learning_rate
+            min_lr=self.config.min_learning_rate,
         )
 
         # Prepare model, optimizer and scheduler with accelerator
         self.vae, self.optimizer, self.scheduler = self.accelerator.prepare(
             self.vae, self.optimizer, self.scheduler
-        )           
+        )
 
         self.vae = torch.compile(self.vae)
 
@@ -187,7 +190,9 @@ class VAETrainer:
     def save_checkpoint(self, epoch, global_step):
         """Save model checkpoint"""
         if self.accelerator.is_main_process:
-            print(f"Saving checkpoint at epoch {epoch+1} and step {global_step} to {self.config.output_dir}")
+            print(
+                f"Saving checkpoint at epoch {epoch+1} and step {global_step} to {self.config.output_dir}"
+            )
             os.makedirs(self.config.output_dir, exist_ok=True)
             checkpoint_path = os.path.join(
                 self.config.output_dir, f"vae_epoch_{epoch+1}_{global_step}.pt"
@@ -255,7 +260,10 @@ class VAETrainer:
                             f"Epoch {epoch+1} Loss: {sum(epoch_losses) / len(epoch_losses):.4f}"
                         )
 
-                        if self.config.use_wandb and global_step % self.config.logging_steps == 0:
+                        if (
+                            self.config.use_wandb
+                            and global_step % self.config.logging_steps == 0
+                        ):
                             # Get current learning rate
                             current_lr = self.scheduler.get_last_lr()[0]
                             wandb.log(
@@ -309,10 +317,19 @@ def main():
     trainer = VAETrainer(config)
 
     # Setup data loading
+    if config.dataset_type == "webdataset":
+        ImageDataset = WebDataset
+    elif config.dataset_type == "hfdataset":
+        ImageDataset = HfDataset
+    else:
+        raise ValueError(
+            f"Invalid dataset type: {config.dataset_type}. Must be 'webdataset' or 'hfdataset'."
+        )
+
     train_loader = DataLoader(
         ImageDataset(split="train", return_actions=False),
         batch_size=config.batch_size,
-        num_workers=os.cpu_count(),
+        num_workers=min(os.cpu_count(), 16),
         prefetch_factor=2,
         persistent_workers=True,
         pin_memory=True,
@@ -321,7 +338,7 @@ def main():
     val_loader = DataLoader(
         ImageDataset(split="validation", return_actions=False),
         batch_size=config.validation_batch_size,
-        num_workers=os.cpu_count(),
+        num_workers=min(os.cpu_count(), 4),
         prefetch_factor=2,
         persistent_workers=True,
         pin_memory=True,

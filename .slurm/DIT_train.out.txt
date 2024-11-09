@@ -1,9 +1,1 @@
 CUDA_VISIBLE_DEVICES 0,1,2,3
-Loaded dataset for train split with 128 tar files
-Loaded dataset for validation split with 1 tar files
-Loaded dataset for train split with 128 tar files
-Loaded dataset for validation split with 1 tar files
-Loaded dataset for train split with 128 tar files
-Loaded dataset for validation split with 1 tar files
-Loaded dataset for train split with 128 tar files
-Loaded dataset for validation split with 1 tar files

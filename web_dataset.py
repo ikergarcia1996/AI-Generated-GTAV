@@ -33,7 +33,7 @@ def action_to_one_hot(action: int) -> torch.tensor:
     return torch.nn.functional.one_hot(actions_tensor, num_classes=10)
 
 
-def actions_to_one_hot1(actions: List[int]) -> torch.tensor:
+def actions_to_one_hot(actions: List[int]) -> torch.tensor:
     """
     Converts actions to one-hot encoded vectors using torch.scatter_.
     Handles -1 values by creating a zero vector (no action).
@@ -136,6 +136,13 @@ class ImageDataset(IterableDataset):
 
         print(f"Loaded dataset for {split} split with {len(files)} tar files")
 
+
+    def __len__(self):
+        """
+        Returns the number of examples in the dataset.
+        """
+        return split_len(self.split)
+    
     def __iter__(self):
         """
         Returns a sample from the dataset.
