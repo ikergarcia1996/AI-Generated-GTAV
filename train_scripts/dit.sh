@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH --partition=general
-#SBATCH --qos=xlong
+#SBATCH --account=hitz-exclusive
+#SBATCH --partition=hitz-exclusive
 #SBATCH --job-name=DIT_train
 #SBATCH --cpus-per-task=16
 #SBATCH --nodes=1
