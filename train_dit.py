@@ -231,12 +231,17 @@ class DiffusionTrainer:
         )
 
         with torch.autocast(
+            "cuda",
             enabled=True,
             dtype=torch.bfloat16
             if self.accelerator.mixed_precision == "bf16"
             else torch.float16,
         ):
-            with tqdm(total=total_steps, desc="Validation") as pbar:
+            with tqdm(
+                total=total_steps,
+                desc="Validation",
+                disable=not self.accelerator.is_local_main_process,
+            ) as pbar:
                 for batch in val_loader:
                     frames = batch["video"]
                     if self.config.use_action_conditioning:

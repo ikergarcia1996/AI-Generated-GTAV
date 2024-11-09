@@ -170,12 +170,17 @@ class VAETrainer:
             self.config.validation_batch_size * self.accelerator.num_processes
         )
         with torch.autocast(
+            "cuda",
             enabled=True,
             dtype=torch.bfloat16
             if self.accelerator.mixed_precision == "bf16"
             else torch.float16,
         ):
-            with tqdm(total=total_steps, desc="Validation") as pbar:
+            with tqdm(
+                total=total_steps,
+                desc="Validation",
+                disable=not self.accelerator.is_local_main_process,
+            ) as pbar:
                 for batch in val_loader:
                     frames = rearrange(batch["video"], "b t c h w -> (b t) c h w")
                     frames_normalized = frames * 2 - 1
