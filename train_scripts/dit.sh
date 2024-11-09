@@ -2,11 +2,11 @@
 #SBATCH --account=hitz-exclusive
 #SBATCH --partition=hitz-exclusive
 #SBATCH --job-name=DIT_train
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=40
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
 #SBATCH --constraint=a100
-#SBATCH --mem=300G
+#SBATCH --mem=512G
 #SBATCH --output=.slurm/DIT_train.out.txt
 #SBATCH --error=.slurm/DIT_train.err.txt
 
@@ -19,7 +19,7 @@ export LANG=en_US.UTF-8
 export LANGUAGE=en_US.UTF-8
 export TOKENIZERS_PARALLELISM=true
 export TRANSFORMERS_NO_ADVISORY_WARNINGS=true
-export OMP_NUM_THREADS=16
+export OMP_NUM_THREADS=32
 
 echo CUDA_VISIBLE_DEVICES "${CUDA_VISIBLE_DEVICES}"
 

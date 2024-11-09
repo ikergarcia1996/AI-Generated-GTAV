@@ -1,1 +1,21 @@
 CUDA_VISIBLE_DEVICES 0,1,2,3
+Using HFDataset. This will load the dataset into memory. Is faster, but requires A LOT of RAM.
+Using HFDataset. This will load the dataset into memory. Is faster, but requires A LOT of RAM.
+Using HFDataset. This will load the dataset into memory. Is faster, but requires A LOT of RAM.
+Using HFDataset. This will load the dataset into memory. Is faster, but requires A LOT of RAM.
+Loaded dataset for train split with 1270669 examples
+Loaded dataset for train split with 1270669 examples
+Loaded dataset for train split with 1270669 examples
+Loaded dataset for train split with 1270669 examples
+Loaded dataset for validation split with 4038 examples
+Loaded dataset for validation split with 4038 examples
+Loaded dataset for validation split with 4038 examples
+Loaded dataset for validation split with 4038 examples
+[GPU 1/4] Frames shape: torch.Size([32, 5, 3, 360, 640])
+[GPU 1/4] Frame values - Min: 0.000, Max: 1.000, Mean: 0.171
+[GPU 0/4] Frames shape: torch.Size([32, 5, 3, 360, 640])
+[GPU 0/4] Frame values - Min: 0.000, Max: 1.000, Mean: 0.129
+[GPU 3/4] Frames shape: torch.Size([32, 5, 3, 360, 640])
+[GPU 3/4] Frame values - Min: 0.000, Max: 1.000, Mean: 0.172
+[GPU 2/4] Frames shape: torch.Size([32, 5, 3, 360, 640])
+[GPU 2/4] Frame values - Min: 0.000, Max: 1.000, Mean: 0.185

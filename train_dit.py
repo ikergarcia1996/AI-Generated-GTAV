@@ -9,7 +9,6 @@ from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from einops import rearrange
-from torch.cuda.amp import autocast
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -47,7 +46,11 @@ class TrainingConfig:
     logging_steps: int = 10
     use_action_conditioning: bool = True
     warnup_ratio: float = 0.1
+    max_grad_norm: float = 1.0
+    loss_scale: float = 1000.0  # Add loss scaling for numerical stability
     dataset_type: Literal["webdataset", "hfdataset"] = "webdataset"
+    use_ema: bool = True  # Add EMA (exponential moving average)
+    ema_decay: float = 0.995
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":
@@ -102,6 +105,8 @@ class DiffusionTrainer:
             self.dit.parameters(),
             lr=config.learning_rate,
             weight_decay=config.weight_decay,
+            betas=(0.9, 0.999),
+            eps=1e-7,
         )
 
         # Calculate total steps for scheduler
@@ -127,10 +132,24 @@ class DiffusionTrainer:
             min_lr=self.config.min_learning_rate,
         )
 
+        if config.use_ema:
+            from torch_ema import ExponentialMovingAverage
+
+            self.ema = ExponentialMovingAverage(
+                self.dit.parameters(), decay=config.ema_decay
+            )
+            self.ema = self.accelerator.prepare(self.ema)
+
         # Update prepare statement to include scheduler
         self.dit, self.vae, self.optimizer, self.scheduler = self.accelerator.prepare(
             self.dit, self.vae, self.optimizer, self.scheduler
         )
+
+        if config.use_ema:
+            self.ema = self.accelerator.prepare(self.ema)
+            # Ensure EMA parameters are on the same device as the model
+            for param, ema_param in zip(self.dit.parameters(), self.ema.shadow_params):
+                ema_param.data = ema_param.data.to(param.device)
 
         # Setup diffusion parameters
         self.max_noise_level = 1000
@@ -211,7 +230,12 @@ class DiffusionTrainer:
             self.config.validation_batch_size * self.accelerator.num_processes
         )
 
-        with autocast(enabled=self.mixed_precision == self.accelerator.mixed_precision):
+        with torch.autocast(
+            enabled=True,
+            dtype=torch.bfloat16
+            if self.accelerator.mixed_precision == "bf16"
+            else torch.float16,
+        ):
             with tqdm(total=total_steps, desc="Validation") as pbar:
                 for batch in val_loader:
                     frames = batch["video"]
@@ -410,17 +434,28 @@ class DiffusionTrainer:
                 # OR Option 2: Resize v to match noise
                 # v = v[..., :noise.shape[-1]]
 
-            loss = nn.functional.mse_loss(v[:, -1:], noise)
+            loss = nn.functional.mse_loss(v[:, -1:], noise) * self.config.loss_scale
 
             # Accumulate loss
             total_loss += loss
 
-            # Backward pass for each frame
-            self.accelerator.backward(
-                loss / (total_frames - self.config.n_prompt_frames)
+            # Scale the loss back down for backward pass
+            scaled_loss = loss / (
+                (total_frames - self.config.n_prompt_frames)
+                * self.config.loss_scale
+                * self.config.gradient_accumulation_steps
             )
 
-        return total_loss / (total_frames - self.config.n_prompt_frames)
+            # Backward pass for each frame
+            self.accelerator.backward(scaled_loss)
+
+            # Update EMA model if enabled
+        if self.config.use_ema:
+            self.ema.update()
+
+        return total_loss / (
+            (total_frames - self.config.n_prompt_frames) * self.config.loss_scale
+        )
 
     def save_checkpoint(self, epoch, global_step):
         """Save model checkpoint"""
@@ -444,7 +479,7 @@ class DiffusionTrainer:
         train_loader, val_loader = self.accelerator.prepare(train_loader, val_loader)
 
         self.dit.train()
-        total_dataset_size = split_len("train") * 5
+        total_dataset_size = split_len("train")
         steps_per_epoch = total_dataset_size // (
             self.config.batch_size
             * self.accelerator.num_processes
@@ -480,6 +515,9 @@ class DiffusionTrainer:
 
                     # Update weights after gradient accumulation steps
                     if (step + 1) % self.config.gradient_accumulation_steps == 0:
+                        self.accelerator.clip_grad_norm_(
+                            self.dit.parameters(), self.config.max_grad_norm
+                        )
                         self.optimizer.step()
                         self.scheduler.step()
                         self.optimizer.zero_grad()
@@ -535,8 +573,14 @@ def main():
     # Setup data loading
 
     if config.dataset_type == "webdataset":
+        print(
+            "Using WebDataset. This will stream the dataset from the webdataset directory. Is memory efficient, but may be slow."
+        )
         ImageDataset = WebDataset
     elif config.dataset_type == "hfdataset":
+        print(
+            "Using HFDataset. This will load the dataset into memory. Is faster, but requires A LOT of RAM."
+        )
         ImageDataset = HfDataset
     else:
         raise ValueError(
@@ -546,7 +590,7 @@ def main():
     train_loader = DataLoader(
         ImageDataset(split="train", return_actions=config.use_action_conditioning),
         batch_size=config.batch_size,
-        num_workers=min(os.cpu_count(), 16),
+        num_workers=min(os.cpu_count(), 32),
         prefetch_factor=2,
         persistent_workers=True,
         pin_memory=True,
@@ -555,7 +599,7 @@ def main():
     val_loader = DataLoader(
         ImageDataset(split="validation", return_actions=config.use_action_conditioning),
         batch_size=config.validation_batch_size,
-        num_workers=min(os.cpu_count(), 4),
+        num_workers=min(os.cpu_count(), 8),
         prefetch_factor=2,
         persistent_workers=True,
         pin_memory=True,

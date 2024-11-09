@@ -38,6 +38,9 @@ class VAETrainingConfig:
     validation_steps: int = 1000
     logging_steps: int = 10
     warnup_ratio: float = 0.1
+    max_grad_norm: float = 1.0
+    use_ema: bool = True  # Add EMA (exponential moving average)
+    ema_decay: float = 0.995
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "VAETrainingConfig":
@@ -75,11 +78,12 @@ class VAETrainer:
 
         # Setup optimizer
         self.optimizer = AdamW(
-            self.vae.parameters(),
-            lr=float(config.learning_rate),
+            self.dit.parameters(),
+            lr=config.learning_rate,
             weight_decay=config.weight_decay,
+            betas=(0.9, 0.999),
+            eps=1e-7,
         )
-
         # Calculate total steps for scheduler
         total_dataset_size = split_len("train") * 5
         self.steps_per_epoch = total_dataset_size // (
@@ -102,6 +106,14 @@ class VAETrainer:
             num_cycles=0.5,  # Standard cosine decay
             min_lr=self.config.min_learning_rate,
         )
+
+        if config.use_ema:
+            from torch_ema import ExponentialMovingAverage
+
+            self.ema = ExponentialMovingAverage(
+                self.dit.parameters(), decay=config.ema_decay
+            )
+            self.ema = self.accelerator.prepare(self.ema)
 
         # Prepare model, optimizer and scheduler with accelerator
         self.vae, self.optimizer, self.scheduler = self.accelerator.prepare(
@@ -143,6 +155,9 @@ class VAETrainer:
         # Backward pass
         self.accelerator.backward(loss)
 
+        if self.config.use_ema:
+            self.ema.update()
+
         return {"loss": loss, "recon_loss": recon_loss, "kl_loss": kl_loss}
 
     @torch.inference_mode()
@@ -154,35 +169,41 @@ class VAETrainer:
         total_steps = total_dataset_size // (
             self.config.validation_batch_size * self.accelerator.num_processes
         )
-        with tqdm(total=total_steps, desc="Validation") as pbar:
-            for batch in val_loader:
-                frames = rearrange(batch["video"], "b t c h w -> (b t) c h w")
-                frames_normalized = frames * 2 - 1
+        with torch.autocast(
+            enabled=True,
+            dtype=torch.bfloat16
+            if self.accelerator.mixed_precision == "bf16"
+            else torch.float16,
+        ):
+            with tqdm(total=total_steps, desc="Validation") as pbar:
+                for batch in val_loader:
+                    frames = rearrange(batch["video"], "b t c h w -> (b t) c h w")
+                    frames_normalized = frames * 2 - 1
 
-                recon, posterior, _ = self.vae(frames_normalized, None)
-                recon = (recon + 1) / 2
+                    recon, posterior, _ = self.vae(frames_normalized, None)
+                    recon = (recon + 1) / 2
 
-                recon_loss = nn.functional.mse_loss(recon, frames)
-                kl_loss = (
-                    0.5
-                    * torch.sum(
-                        torch.exp(posterior.logvar)
-                        + posterior.mean**2
-                        - 1.0
-                        - posterior.logvar,
-                        dim=posterior.dims,
-                    ).mean()
-                )
+                    recon_loss = nn.functional.mse_loss(recon, frames)
+                    kl_loss = (
+                        0.5
+                        * torch.sum(
+                            torch.exp(posterior.logvar)
+                            + posterior.mean**2
+                            - 1.0
+                            - posterior.logvar,
+                            dim=posterior.dims,
+                        ).mean()
+                    )
 
-                loss = recon_loss + self.config.kl_weight * kl_loss
-                val_losses.append(
-                    {
-                        "loss": loss.item(),
-                        "recon_loss": recon_loss.item(),
-                        "kl_loss": kl_loss.item(),
-                    }
-                )
-                pbar.update(1)
+                    loss = recon_loss + self.config.kl_weight * kl_loss
+                    val_losses.append(
+                        {
+                            "loss": loss.item(),
+                            "recon_loss": recon_loss.item(),
+                            "kl_loss": kl_loss.item(),
+                        }
+                    )
+                    pbar.update(1)
 
         self.vae.train()
         return val_losses
@@ -248,6 +269,9 @@ class VAETrainer:
 
                     # Update weights
                     if (step + 1) % self.config.gradient_accumulation_steps == 0:
+                        self.accelerator.clip_grad_norm_(
+                            self.dit.parameters(), self.config.max_grad_norm
+                        )
                         self.optimizer.step()
                         self.scheduler.step()  # Update learning rate
                         self.optimizer.zero_grad()

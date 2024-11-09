@@ -75,7 +75,7 @@ class ImageDataset(Dataset):
         sample = self.dataset[idx]
 
         # Convert PIL image to tensor and apply transforms
-        img = self.transform(sample["image"])
+        img = self.transform(sample["jpg"])
 
         if self.return_actions:
             actions = action_to_one_hot(sample["label"])
