@@ -130,3 +130,5 @@ checkpoints/
 *.ipynb
 
 wandb/
+
+.slurm/
