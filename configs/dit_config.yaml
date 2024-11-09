@@ -1,0 +1,26 @@
+vae_checkpoint: checkpoints/vae_epoch_1_100.pt
+learning_rate: 1e-4
+min_learning_rate: 1e-6
+warnup_ratio: 0.03
+weight_decay: 0.01
+batch_size: 32
+gradient_accumulation_steps: 2
+validation_batch_size: 8
+
+num_epochs: 5
+max_steps: -1  
+validation_steps: 10000
+save_every: 10000
+output_dir: checkpoints
+logging_steps: 4
+
+seed: 42
+use_wandb: true
+
+ddim_noise_steps:  16
+ctx_max_noise_idx:  4 
+noise_abs_max: 20.0
+n_prompt_frames: 4
+
+
+use_action_conditioning: false

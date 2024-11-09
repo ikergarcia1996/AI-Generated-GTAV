@@ -161,9 +161,9 @@ class AutoencoderKL(nn.Module):
     def __init__(
         self,
         latent_dim,
-        input_height=256,
-        input_width=256,
-        patch_size=16,
+        input_height=270,
+        input_width=480,
+        patch_size=24,
         enc_dim=768,
         enc_depth=6,
         enc_heads=12,
@@ -292,6 +292,9 @@ class AutoencoderKL(nn.Module):
         ).permute(
             [0, 1, 4, 2, 5, 3]
         )  # [b, c, p, p, h, w] --> [b, c, h, p, w, p]
+
+        #print(x.shape)
+        #print(self.input_height, self.input_width)
         x = x.reshape(
             bsz,
             3,

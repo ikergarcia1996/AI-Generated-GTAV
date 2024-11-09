@@ -36,8 +36,8 @@ class PatchEmbed(nn.Module):
 
     def __init__(
         self,
-        img_height=256,
-        img_width=256,
+        img_height=270,
+        img_width=480,
         patch_size=16,
         in_chans=3,
         embed_dim=768,
@@ -296,6 +296,8 @@ class DiT(nn.Module):
 
 def DiT_S_2():
     return DiT(
+        input_h=18,  # Changed from 18
+        input_w=32, # Changed from 32
         patch_size=2,
         hidden_size=1024,
         depth=16,
