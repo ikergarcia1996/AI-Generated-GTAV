@@ -21,6 +21,7 @@ from model.vae import VAE_models
 from utils import sigmoid_beta_schedule
 from web_dataset import ImageDataset as WebDataset
 from web_dataset import split_len
+from torch.io import write_video
 
 
 @dataclass
@@ -36,9 +37,9 @@ class TrainingConfig:
     use_wandb: bool = True
     output_dir: str = "checkpoints"
     ddim_noise_steps: int = 16
-    ctx_max_noise_idx: int = 4  # (ddim_noise_steps // 10) * 3
+    ctx_max_noise_idx: int = 3  # (ddim_noise_steps // 10) * 3
     noise_abs_max: float = 20.0
-    n_prompt_frames: int = 4
+    n_prompt_frames: int = 1
     min_learning_rate: float = 1e-6
     validation_batch_size: int = 8
     max_steps: int = -1  # -1 means no maximum steps limit
@@ -52,7 +53,7 @@ class TrainingConfig:
     use_ema: bool = True  # Add EMA (exponential moving average)
     ema_decay: float = 0.995
     pretrained_model: str = None
-    model_name:str = "dit"
+    model_name: str = "dit"
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":
@@ -172,23 +173,7 @@ class DiffusionTrainer:
             for param, ema_param in zip(self.dit.parameters(), self.ema.shadow_params):
                 ema_param.data = ema_param.data.to(param.device)
 
-        # Setup diffusion parameters
-        self.max_noise_level = 1000
-        self.betas = sigmoid_beta_schedule(self.max_noise_level)
-        self.alphas = 1.0 - self.betas
-        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
-        self.alphas_cumprod = rearrange(self.alphas_cumprod, "T -> T 1 1 1")
 
-        self.betas = self.betas.to(self.accelerator.device)
-        self.alphas = self.alphas.to(self.accelerator.device)
-        self.alphas_cumprod = self.alphas_cumprod.to(self.accelerator.device)
-
-        # Update diffusion parameters with DDIM-style scheduling
-        self.noise_range = (
-            torch.linspace(-1, self.max_noise_level - 1, config.ddim_noise_steps + 1)
-            .long()
-            .to(self.accelerator.device)
-        )
 
         # Move diffusion parameters to accelerator device
         # self.betas, self.alphas, self.alphas_cumprod = self.accelerator.prepare(
@@ -212,14 +197,19 @@ class DiffusionTrainer:
 
     def register_buffers(self):
         """Pre-compute and cache tensors on device"""
+                # Setup diffusion parameters
+        self.max_noise_level = 1000
+        self.betas = sigmoid_beta_schedule(self.max_noise_level).to(self.accelerator.device)
+        self.alphas = 1.0 - self.betas
+        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+        self.alphas_cumprod = rearrange(self.alphas_cumprod, "T -> T 1 1 1")
+
+        # Update diffusion parameters with DDIM-style scheduling
         self.noise_range = (
-            torch.linspace(
-                -1, self.max_noise_level - 1, self.config.ddim_noise_steps + 1
-            )
+            torch.linspace(-1, self.max_noise_level - 1, self.config.ddim_noise_steps + 1)
             .long()
             .to(self.accelerator.device)
         )
-        self.alphas_cumprod = self.alphas_cumprod.to(self.accelerator.device)
 
     @torch.inference_mode()
     def encode_frames(self, frames):
@@ -294,16 +284,19 @@ class DiffusionTrainer:
                         t_ctx = torch.full(
                             (batch_size, i),
                             self.noise_range[ctx_noise_idx],
+                            dtype=torch.long,
                             device=self.accelerator.device,
                         )
                         t = torch.full(
                             (batch_size, 1),
                             self.noise_range[noise_idx],
+                             dtype=torch.long,
                             device=self.accelerator.device,
                         )
                         t_next = torch.full(
                             (batch_size, 1),
                             self.noise_range[noise_idx - 1],
+                            dtype=torch.long,
                             device=self.accelerator.device,
                         )
                         t_next = torch.where(t_next < 0, t, t_next)
@@ -345,8 +338,12 @@ class DiffusionTrainer:
                         # Model prediction
                         v = self.dit(x_noisy, t, actions_curr)
 
-                        # Compute loss (only on the current frame)
-                        loss = nn.functional.mse_loss(v[:, -1:], noise)
+                        # The model predicts v (noise), and we can directly compare it with the noise we added
+                        loss = (
+                            nn.functional.mse_loss(v[:, -1:], noise)
+                            * self.config.loss_scale
+                        )
+
                         total_loss += loss
 
                     avg_loss = total_loss / (total_frames - self.config.n_prompt_frames)
@@ -355,6 +352,128 @@ class DiffusionTrainer:
 
         self.dit.train()
         return val_losses
+
+    @torch.inference_mode()
+    def predict(self, test_loader, epoch, global_step, num_frames=32):
+        """Generate a video from a prompt frame and optional actions"""
+        self.dit.eval()
+
+        # Move inputs to device and add batch dimension if needed
+        prompt = next(iter(test_loader))
+        prompt = prompt["video"]
+        if self.config.use_action_conditioning:
+            actions = prompt["actions"]
+        else:
+            actions = None
+
+        # Encode prompt with VAE
+        latents = self.encode_frames(prompt)
+        batch_size = latents.shape[0]
+        n_prompt_frames = latents.shape[1]
+
+        # Initialize noise schedule for generation
+        noise_range = (
+            torch.linspace(-1, self.max_noise_level - 1, self.config.ddim_noise_steps + 1)
+            .long()
+            .to(self.accelerator.device)
+        )
+        stabilization_level = 15  # Same as generate_og.py
+
+        # Generation loop
+        for i in tqdm(
+            range(n_prompt_frames, num_frames),
+            desc="Generating test frames",
+            disable=not self.accelerator.is_local_main_process,
+        ):
+            # Add noise for new frame
+            chunk = torch.randn(
+                (batch_size, 1, *latents.shape[-3:]), device=self.accelerator.device
+            )
+            chunk = torch.clamp(
+                chunk, -self.config.noise_abs_max, self.config.noise_abs_max
+            )
+            latents = torch.cat([latents, chunk], dim=1)
+            start_frame = max(0, i + 1 - self.max_frames)
+
+            # Denoise the new frame
+            for noise_idx in reversed(range(1, self.config.ddim_noise_steps + 1)):
+                # Set up noise values
+                t_ctx = torch.full(
+                    (batch_size, i),
+                    stabilization_level - 1,
+                    dtype=torch.long,
+                    device=self.accelerator.device,
+                )
+                t = torch.full(
+                    (batch_size, 1),
+                    noise_range[noise_idx],
+                    dtype=torch.long,
+                    device=self.accelerator.device,
+                )
+                t_next = torch.full(
+                    (batch_size, 1),
+                    noise_range[noise_idx - 1],
+                    dtype=torch.long,
+                    device=self.accelerator.device,
+                )
+                t_next = torch.where(t_next < 0, t, t_next)
+                t = torch.cat([t_ctx, t], dim=1)
+                t_next = torch.cat([t_ctx, t_next], dim=1)
+
+                # Apply sliding window
+                x_curr = latents[:, start_frame:]
+                t = t[:, start_frame:]
+                t_next = t_next[:, start_frame:]
+                actions_curr = (
+                    actions[:, start_frame : i + 1] if actions is not None else None
+                )
+
+                # Get model predictions
+                with torch.autocast(
+                    "cuda",
+                    enabled=True,
+                    dtype=torch.bfloat16
+                    if self.accelerator.mixed_precision == "bf16"
+                    else torch.float16,
+                ):
+                    v = self.dit(x_curr, t, actions_curr)
+
+                # Compute x_start prediction
+                x_start = (
+                    self.alphas_cumprod[t].sqrt() * x_curr
+                    - (1 - self.alphas_cumprod[t]).sqrt() * v
+                )
+                x_noise = ((1 / self.alphas_cumprod[t]).sqrt() * x_curr - x_start) / (
+                    1 / self.alphas_cumprod[t] - 1
+                ).sqrt()
+
+                # Update prediction
+                alpha_next = self.alphas_cumprod[t_next]
+                alpha_next[:, :-1] = torch.ones_like(alpha_next[:, :-1])
+                if noise_idx == 1:
+                    alpha_next[:, -1:] = torch.ones_like(alpha_next[:, -1:])
+                x_pred = alpha_next.sqrt() * x_start + x_noise * (1 - alpha_next).sqrt()
+                latents[:, -1:] = x_pred[:, -1:]
+
+        # Decode latents to pixels
+        scaling_factor = 0.07843137255
+        latents = rearrange(latents, "b t c h w -> (b t) (h w) c")
+        with torch.no_grad():
+            pixels = (self.vae.decode(latents / scaling_factor) + 1) / 2
+        pixels = rearrange(pixels, "(b t) c h w -> b t h w c", t=num_frames)
+
+        # Convert to uint8 video
+        pixels = torch.clamp(pixels * 255, 0, 255).byte()
+
+        video_path = f"test_{self.config.model_name}_{self.accelerator.process_index}_epoch_{epoch}_gs_{global_step}.mp4"
+        write_video(
+           video_path,
+            pixels[0].cpu(),
+            fps=10,
+        )
+        print(
+            f"generation saved to {video_path}."
+        )
 
     def training_step(self, frames, actions):
         """Single training step with context-aware noise scheduling"""
@@ -453,13 +572,7 @@ class DiffusionTrainer:
             # Model prediction
             v = self.dit(x_noisy, t, actions_curr)
 
-            # Ensure tensors have matching shapes before MSE loss
-            if v[:, -1:].shape != noise.shape:
-                # Option 1: Resize noise to match v
-                noise = noise[..., : v.shape[-1]]
-                # OR Option 2: Resize v to match noise
-                # v = v[..., :noise.shape[-1]]
-
+            # The model predicts v (noise), and we can directly compare it with the noise we added
             loss = nn.functional.mse_loss(v[:, -1:], noise) * self.config.loss_scale
 
             # Accumulate loss
@@ -491,7 +604,8 @@ class DiffusionTrainer:
             )
             os.makedirs(self.config.output_dir, exist_ok=True)
             checkpoint_path = os.path.join(
-                self.config.output_dir, f"{self.config.model_name}_epoch_{epoch+1}_{global_step}.pt"
+                self.config.output_dir,
+                f"{self.config.model_name}_epoch_{epoch+1}_{global_step}.pt",
             )
             # Fix: Save DiT model state dict instead of VAE
             self.accelerator.save(
@@ -521,6 +635,31 @@ class DiffusionTrainer:
         ) as progress_bar:
             global_step = 0
 
+
+            # Evaluate model before training
+            val_losses = self.validation(val_loader)
+            avg_val_loss = sum(d["loss"] for d in val_losses) / len(
+                val_losses
+            )
+
+            if (
+                self.accelerator.is_main_process
+                and self.config.use_wandb
+            ):
+                wandb.log(
+                    {
+                        "val_loss": avg_val_loss,
+                        "epoch": 0,
+                        "step": global_step,
+                    }
+                )
+
+            self.predict(
+                val_loader,
+                epoch=0,
+                global_step=global_step,
+            )
+            
             for epoch in range(self.config.num_epochs):
                 accumulated_loss = 0.0  # Add accumulator
                 for step, batch in enumerate(train_loader):
@@ -589,6 +728,12 @@ class DiffusionTrainer:
                                         "step": global_step,
                                     }
                                 )
+
+                            self.predict(
+                                val_loader,
+                                epoch=0,
+                                global_step=global_step,
+                            )
 
                         # Save checkpoint
                         if (

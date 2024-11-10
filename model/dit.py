@@ -302,6 +302,7 @@ def DiT_S_2():
         hidden_size=1024,
         depth=16,
         num_heads=16,
+        max_frames=5,
     )
 
 DiT_models = {
