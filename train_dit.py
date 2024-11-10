@@ -49,10 +49,7 @@ class TrainingConfig:
     use_action_conditioning: bool = True
     warnup_ratio: float = 0.05
     max_grad_norm: float = 1.0
-    loss_scale: float = 1.0  # Add loss scaling for numerical stability
     dataset_type: Literal["webdataset", "hfdataset", "dummy"] = "webdataset"
-    use_ema: bool = False  # Add EMA (exponential moving average)
-    ema_decay: float = 0.995
     pretrained_model: str = None
     model_name: str = "dit"
 
@@ -155,24 +152,10 @@ class DiffusionTrainer:
             min_lr=self.config.min_learning_rate,
         )
 
-        if config.use_ema:
-            from torch_ema import ExponentialMovingAverage
-
-            self.ema = ExponentialMovingAverage(
-                self.dit.parameters(), decay=config.ema_decay
-            )
-            self.ema = self.accelerator.prepare(self.ema)
-
         # Update prepare statement to include scheduler
         self.dit, self.vae, self.optimizer, self.scheduler = self.accelerator.prepare(
             self.dit, self.vae, self.optimizer, self.scheduler
         )
-
-        if config.use_ema:
-            self.ema = self.accelerator.prepare(self.ema)
-            # Ensure EMA parameters are on the same device as the model
-            for param, ema_param in zip(self.dit.parameters(), self.ema.shadow_params):
-                ema_param.data = ema_param.data.to(param.device)
 
         # Compile models for faster training (PyTorch 2.0+)
         # self.dit = torch.compile(self.dit)
@@ -333,7 +316,6 @@ class DiffusionTrainer:
                         # The model predicts v (noise), and we can directly compare it with the noise we added
                         loss = (
                             nn.functional.mse_loss(v[:, -1:], noise)
-                            * self.config.loss_scale
                         )
 
                         total_loss += loss
@@ -570,7 +552,7 @@ class DiffusionTrainer:
             v = self.dit(x_noisy, t, actions_curr)
 
             # The model predicts v (noise), and we can directly compare it with the noise we added
-            loss = nn.functional.mse_loss(v[:, -1:], noise) * self.config.loss_scale
+            loss = nn.functional.mse_loss(v[:, -1:], noise)
 
             # Accumulate loss
             total_loss += loss
@@ -578,19 +560,14 @@ class DiffusionTrainer:
             # Scale the loss back down for backward pass
             scaled_loss = loss / (
                 (total_frames - self.config.n_prompt_frames)
-                * self.config.loss_scale
                 * self.config.gradient_accumulation_steps
             )
 
             # Backward pass for each frame
             self.accelerator.backward(scaled_loss)
 
-            # Update EMA model if enabled
-        if self.config.use_ema:
-            self.ema.update()
-
         return total_loss / (
-            (total_frames - self.config.n_prompt_frames) * self.config.loss_scale
+            (total_frames - self.config.n_prompt_frames)
         )
 
     def save_checkpoint(self, epoch, global_step):
