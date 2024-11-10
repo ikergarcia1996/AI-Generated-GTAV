@@ -41,8 +41,8 @@ def load_models(accelerator: Accelerator, dit_model_path: str, vae_model_path: s
     vae_model.load_state_dict(vae_ckpt)
 
     dit_model, vae_model = accelerator.prepare(dit_model, vae_model)
-    # dit_model = torch.compile(dit_model)
-    # vae_model = torch.compile(vae_model)
+    dit_model = torch.compile(dit_model)
+    vae_model = torch.compile(vae_model)
 
     return dit_model, vae_model
 
