@@ -5,20 +5,20 @@ learning_rate: 1e-6
 min_learning_rate: 1e-7
 warnup_ratio: 0.05
 batch_size: 32
-gradient_accumulation_steps: 2
+gradient_accumulation_steps: 1
 validation_batch_size: 8
 dataset_type: hfdataset
 
 weight_decay: 0.01
-loss_scale: 1000.0
-use_ema: true
+loss_scale: 1.0
+use_ema: false
 ema_decay: 0.995
 
 
 num_epochs: 5
 max_steps: -1  
-validation_steps: 2000
-save_every: 2000
+validation_steps: 10
+save_every: 10
 output_dir: checkpoints
 logging_steps: 5
 

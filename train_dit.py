@@ -20,19 +20,20 @@ from model.dit import DiT_models
 from model.vae import VAE_models
 from utils import sigmoid_beta_schedule
 from web_dataset import ImageDataset as WebDataset
+from dummy_dataset import ImageDataset as DummyDataset
 from web_dataset import split_len
-from torch.io import write_video
+from torchvision.io import write_video
 
 
 @dataclass
 class TrainingConfig:
     vae_checkpoint: str = "checkpoints/vit-l-20.pt"
-    learning_rate: float = 1e-4
+    learning_rate: float = 1e-5
     weight_decay: float = 0.01
-    batch_size: int = 4
-    num_epochs: int = 100
-    save_every: int = 5
-    gradient_accumulation_steps: int = 1
+    batch_size: int = 16
+    num_epochs: int = 5
+    save_every: int = 2000
+    gradient_accumulation_steps: int = 2
     seed: int = 42
     use_wandb: bool = True
     output_dir: str = "checkpoints"
@@ -43,14 +44,14 @@ class TrainingConfig:
     min_learning_rate: float = 1e-6
     validation_batch_size: int = 8
     max_steps: int = -1  # -1 means no maximum steps limit
-    validation_steps: int = 1000
-    logging_steps: int = 10
+    validation_steps: int = 2000
+    logging_steps: int = 5
     use_action_conditioning: bool = True
-    warnup_ratio: float = 0.1
+    warnup_ratio: float = 0.05
     max_grad_norm: float = 1.0
-    loss_scale: float = 1000.0  # Add loss scaling for numerical stability
-    dataset_type: Literal["webdataset", "hfdataset"] = "webdataset"
-    use_ema: bool = True  # Add EMA (exponential moving average)
+    loss_scale: float = 1.0  # Add loss scaling for numerical stability
+    dataset_type: Literal["webdataset", "hfdataset", "dummy"] = "webdataset"
+    use_ema: bool = False  # Add EMA (exponential moving average)
     ema_decay: float = 0.995
     pretrained_model: str = None
     model_name: str = "dit"
@@ -173,43 +174,34 @@ class DiffusionTrainer:
             for param, ema_param in zip(self.dit.parameters(), self.ema.shadow_params):
                 ema_param.data = ema_param.data.to(param.device)
 
-
-
-        # Move diffusion parameters to accelerator device
-        # self.betas, self.alphas, self.alphas_cumprod = self.accelerator.prepare(
-        #    self.betas, self.alphas, self.alphas_cumprod
-        # )
-
-        # Update diffusion parameters with DDIM-style scheduling
-        self.noise_range = torch.linspace(
-            -1, self.max_noise_level - 1, config.ddim_noise_steps + 1
-        ).long()
-
-        # Prepare noise parameters with accelerator
-        self.noise_range = self.accelerator.prepare(self.noise_range)
-
         # Compile models for faster training (PyTorch 2.0+)
-        self.dit = torch.compile(self.dit)
-        self.vae = torch.compile(self.vae)
+        # self.dit = torch.compile(self.dit)
+        # self.vae = torch.compile(self.vae)
 
         # Pre-compute and cache device tensors
         self.register_buffers()
 
     def register_buffers(self):
         """Pre-compute and cache tensors on device"""
-                # Setup diffusion parameters
+        # Setup diffusion parameters
         self.max_noise_level = 1000
-        self.betas = sigmoid_beta_schedule(self.max_noise_level).to(self.accelerator.device)
+        self.betas = sigmoid_beta_schedule(self.max_noise_level).to(
+            self.accelerator.device
+        )
         self.alphas = 1.0 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
         self.alphas_cumprod = rearrange(self.alphas_cumprod, "T -> T 1 1 1")
 
         # Update diffusion parameters with DDIM-style scheduling
         self.noise_range = (
-            torch.linspace(-1, self.max_noise_level - 1, self.config.ddim_noise_steps + 1)
+            torch.linspace(
+                -1, self.max_noise_level - 1, self.config.ddim_noise_steps + 1
+            )
             .long()
             .to(self.accelerator.device)
         )
+
+        self.stabilization_level = 15
 
     @torch.inference_mode()
     def encode_frames(self, frames):
@@ -278,19 +270,19 @@ class DiffusionTrainer:
                         noise_idx = torch.randint(
                             1, self.config.ddim_noise_steps + 1, (1,)
                         ).item()
-                        ctx_noise_idx = min(noise_idx, self.config.ctx_max_noise_idx)
 
                         # Prepare noise levels for context and current frame
                         t_ctx = torch.full(
                             (batch_size, i),
-                            self.noise_range[ctx_noise_idx],
+                            self.stabilization_level
+                            - 1,  # Match the prediction loop's noise level
                             dtype=torch.long,
                             device=self.accelerator.device,
                         )
                         t = torch.full(
                             (batch_size, 1),
                             self.noise_range[noise_idx],
-                             dtype=torch.long,
+                            dtype=torch.long,
                             device=self.accelerator.device,
                         )
                         t_next = torch.full(
@@ -354,13 +346,14 @@ class DiffusionTrainer:
         return val_losses
 
     @torch.inference_mode()
-    def predict(self, test_loader, epoch, global_step, num_frames=32):
+    def predict(self, test_loader, epoch, global_step, num_frames=4):
         """Generate a video from a prompt frame and optional actions"""
         self.dit.eval()
 
         # Move inputs to device and add batch dimension if needed
         prompt = next(iter(test_loader))
         prompt = prompt["video"]
+        prompt = prompt[:, : self.config.n_prompt_frames] # Use only prompt frames
         if self.config.use_action_conditioning:
             actions = prompt["actions"]
         else:
@@ -373,11 +366,12 @@ class DiffusionTrainer:
 
         # Initialize noise schedule for generation
         noise_range = (
-            torch.linspace(-1, self.max_noise_level - 1, self.config.ddim_noise_steps + 1)
+            torch.linspace(
+                -1, self.max_noise_level - 1, self.config.ddim_noise_steps + 1
+            )
             .long()
             .to(self.accelerator.device)
         )
-        stabilization_level = 15  # Same as generate_og.py
 
         # Generation loop
         for i in tqdm(
@@ -400,7 +394,7 @@ class DiffusionTrainer:
                 # Set up noise values
                 t_ctx = torch.full(
                     (batch_size, i),
-                    stabilization_level - 1,
+                    self.stabilization_level - 1,
                     dtype=torch.long,
                     device=self.accelerator.device,
                 )
@@ -465,15 +459,16 @@ class DiffusionTrainer:
         # Convert to uint8 video
         pixels = torch.clamp(pixels * 255, 0, 255).byte()
 
-        video_path = f"test_{self.config.model_name}_{self.accelerator.process_index}_epoch_{epoch}_gs_{global_step}.mp4"
+        os.makedirs("videos", exist_ok=True)
+        video_path = f"videos/test_{self.config.model_name}_{self.accelerator.process_index}_epoch_{epoch}_gs_{global_step}.mp4"
         write_video(
-           video_path,
+            video_path,
             pixels[0].cpu(),
             fps=10,
         )
-        print(
-            f"generation saved to {video_path}."
-        )
+        print(f"generation saved to {video_path}.")
+
+        self.dit.train()
 
     def training_step(self, frames, actions):
         """Single training step with context-aware noise scheduling"""
@@ -517,22 +512,24 @@ class DiffusionTrainer:
 
             # Sample noise indices
             noise_idx = torch.randint(1, self.config.ddim_noise_steps + 1, (1,)).item()
-            ctx_noise_idx = min(noise_idx, self.config.ctx_max_noise_idx)
 
             # Prepare noise levels for context and current frame
             t_ctx = torch.full(
                 (batch_size, i),
-                self.noise_range[ctx_noise_idx],
+                self.stabilization_level - 1,  # Match the prediction loop's noise level
+                dtype=torch.long,
                 device=self.accelerator.device,
             )
             t = torch.full(
                 (batch_size, 1),
                 self.noise_range[noise_idx],
+                dtype=torch.long,
                 device=self.accelerator.device,
             )
             t_next = torch.full(
                 (batch_size, 1),
                 self.noise_range[noise_idx - 1],
+                dtype=torch.long,
                 device=self.accelerator.device,
             )
             t_next = torch.where(t_next < 0, t, t_next)
@@ -635,17 +632,11 @@ class DiffusionTrainer:
         ) as progress_bar:
             global_step = 0
 
-
             # Evaluate model before training
             val_losses = self.validation(val_loader)
-            avg_val_loss = sum(d["loss"] for d in val_losses) / len(
-                val_losses
-            )
+            avg_val_loss = sum(d["loss"] for d in val_losses) / len(val_losses)
 
-            if (
-                self.accelerator.is_main_process
-                and self.config.use_wandb
-            ):
+            if self.accelerator.is_main_process and self.config.use_wandb:
                 wandb.log(
                     {
                         "val_loss": avg_val_loss,
@@ -659,7 +650,7 @@ class DiffusionTrainer:
                 epoch=0,
                 global_step=global_step,
             )
-            
+
             for epoch in range(self.config.num_epochs):
                 accumulated_loss = 0.0  # Add accumulator
                 for step, batch in enumerate(train_loader):
@@ -764,6 +755,9 @@ def main():
             "Using HFDataset. This will load the dataset into memory. Is faster, but requires A LOT of RAM."
         )
         ImageDataset = HfDataset
+    elif config.dataset_type == "dummy":
+        print("Using dummy dataset for testing purposes.")
+        ImageDataset = DummyDataset
     else:
         raise ValueError(
             f"Invalid dataset type: {config.dataset_type}. Must be 'webdataset' or 'hfdataset'."

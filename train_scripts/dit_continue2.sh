@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --account=hitz-exclusive
-#SBATCH --partition=hitz-exclusive
-#SBATCH --job-name=DIT_continue
+#SBATCH --partition=general
+#SBATCH --qos=xlong
+#SBATCH --job-name=DIT_continue2
 #SBATCH --cpus-per-task=32
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
 #SBATCH --constraint=a100
-#SBATCH --mem=400G
-#SBATCH --output=.slurm/DIT_continue.out.txt
-#SBATCH --error=.slurm/DIT_continue.err.txt
+#SBATCH --mem=300G
+#SBATCH --output=.slurm/DIT_continue2.out.txt
+#SBATCH --error=.slurm/DIT_continue2.err.txt
 
 module load CUDA/12.1.1
 module load Python

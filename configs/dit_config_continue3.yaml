@@ -1,8 +1,8 @@
 vae_checkpoint: checkpoints/vit-l-20.pt
 pretrained_model: checkpoints/oasis500m.pt
-model_name: dit_continue2
-learning_rate: 1e-5
-min_learning_rate: 1e-6
+model_name: dit_continue3
+learning_rate: 1e-4
+min_learning_rate: 1e-5
 warnup_ratio: 0.05
 batch_size: 32
 gradient_accumulation_steps: 2

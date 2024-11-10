@@ -137,3 +137,5 @@ wandb/
 *out.txt
 .slurm/DIT_train.err.txt
 .slurm/DIT_train.out.txt
+
+videos/
