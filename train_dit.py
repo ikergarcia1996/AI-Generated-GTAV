@@ -51,6 +51,8 @@ class TrainingConfig:
     dataset_type: Literal["webdataset", "hfdataset"] = "webdataset"
     use_ema: bool = True  # Add EMA (exponential moving average)
     ema_decay: float = 0.995
+    pretrained_model: str = None
+    model_name:str = "dit"
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":
@@ -88,7 +90,26 @@ class DiffusionTrainer:
         set_seed(config.seed)
 
         # Initialize models
-        self.dit = DiT_models["DiT-S/2"]()
+        if config.pretrained_model is None:
+            self.logger.info("Initializing new DiT model from scratch")
+            self.dit = DiT_models["DiT-S/2"]()
+        else:
+            self.logger.info(
+                f"Loading pretrained DiT model from {config.pretrained_model}"
+            )
+            self.dit = DiT_models["DiT-S/2"]()
+            checkpoint = torch.load(config.pretrained_model, map_location="cpu")
+            # Handle potential state_dict wrapper from accelerate
+            if "state_dict" in checkpoint:
+                checkpoint = checkpoint["state_dict"]
+            missing_keys, unexpected_keys = self.dit.load_state_dict(
+                checkpoint, strict=False
+            )
+            if missing_keys:
+                self.logger.warning(f"Missing keys in checkpoint: {missing_keys}")
+            if unexpected_keys:
+                self.logger.warning(f"Unexpected keys in checkpoint: {unexpected_keys}")
+
         self.vae = VAE_models["vit-l-20-shallow-encoder"]()
 
         self.max_frames = self.dit.max_frames
@@ -128,7 +149,7 @@ class DiffusionTrainer:
             self.optimizer,
             num_warmup_steps=num_warmup_steps,
             num_training_steps=total_training_steps,
-            num_cycles=0.5,  # Standard cosine decay
+            num_cycles=0.25,  # Standard cosine decay
             min_lr=self.config.min_learning_rate,
         )
 
@@ -470,7 +491,7 @@ class DiffusionTrainer:
             )
             os.makedirs(self.config.output_dir, exist_ok=True)
             checkpoint_path = os.path.join(
-                self.config.output_dir, f"dit_epoch_{epoch+1}_{global_step}.pt"
+                self.config.output_dir, f"{self.config.model_name}_epoch_{epoch+1}_{global_step}.pt"
             )
             # Fix: Save DiT model state dict instead of VAE
             self.accelerator.save(

@@ -29,7 +29,7 @@ def action_to_one_hot(action: int) -> torch.tensor:
     Returns:
         torch.tensor: One-hot encoded actions of shape (5, 10).
     """
-    actions_tensor = torch.tensor([0, 0, 0, 0, action + 1], dtype=torch.long)
+    actions_tensor = torch.tensor([0, 0, 0, 0, action], dtype=torch.long)
     return torch.nn.functional.one_hot(actions_tensor, num_classes=10)
 
 

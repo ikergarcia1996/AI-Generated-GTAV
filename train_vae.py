@@ -103,7 +103,7 @@ class VAETrainer:
             self.optimizer,
             num_warmup_steps=num_warmup_steps,
             num_training_steps=total_training_steps,
-            num_cycles=0.5,  # Standard cosine decay
+            num_cycles=0.25,  # Standard cosine decay
             min_lr=self.config.min_learning_rate,
         )
 

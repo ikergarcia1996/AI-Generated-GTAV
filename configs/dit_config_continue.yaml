@@ -1,5 +1,6 @@
 vae_checkpoint: checkpoints/vit-l-20.pt
-model_name: dit_scratch
+pretrained_model: checkpoints/oasis500m.pt
+model_name: dit_continue
 learning_rate: 1e-6
 min_learning_rate: 1e-7
 warnup_ratio: 0.05
