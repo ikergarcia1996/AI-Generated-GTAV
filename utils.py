@@ -62,7 +62,7 @@ def cosine_beta_schedule(timesteps, s=0.008):
     alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
     
     # Scale alphas_cumprod to typical range
-    min_value = 0.0001
+    min_value = 0.001
     alphas_cumprod = alphas_cumprod * (1.0 - min_value) + min_value
     
     # Calculate betas

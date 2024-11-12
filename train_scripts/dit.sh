@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --account=hitz-exclusive
-#SBATCH --partition=hitz-exclusive
-#SBATCH --job-name=DIT_train
-#SBATCH --cpus-per-task=32
+#SBATCH --partition=preemption
+#SBATCH --qos=regular
+#SBATCH --job-name=DIT
+#SBATCH --cpus-per-task=8
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:1
 #SBATCH --constraint=a100
-#SBATCH --mem=400G
+#SBATCH --mem=64G
 #SBATCH --output=.slurm/DIT_train.out.txt
 #SBATCH --error=.slurm/DIT_train.err.txt
 
@@ -23,4 +23,4 @@ export OMP_NUM_THREADS=32
 
 echo CUDA_VISIBLE_DEVICES "${CUDA_VISIBLE_DEVICES}"
 
-accelerate launch --mixed_precision bf16 train_dit.py configs/dit_config.yaml
+accelerate launch --mixed_precision bf16 train_dit.py configs/dit_config_dummy.yaml

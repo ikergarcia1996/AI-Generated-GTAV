@@ -23,7 +23,7 @@ use_wandb: true
 
 ddim_noise_steps:  16
 ctx_max_noise_idx:  3 
-noise_abs_max: 20.0
+noise_abs_max: 5.0
 n_prompt_frames: 4
 
 use_action_conditioning: false

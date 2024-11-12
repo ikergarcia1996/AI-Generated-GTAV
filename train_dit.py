@@ -422,19 +422,16 @@ class DiffusionTrainer:
                 print(f"alpha_t: {alpha_t.item():.4f}")
                 print(f"alpha_next: {alpha_next.item():.4f}")
 
-                x_start = (1 / torch.sqrt(alpha_t)) * (
-                    x_noisy[:, -1:] - torch.sqrt(1 - alpha_t) * v[:, -1:]
-                )
+                x_start = alpha_t.sqrt() * x_noisy[:, -1:] - (1 - alpha_t).sqrt() * v[:, -1:]
+                x_noise = ((1 / alpha_t).sqrt() * x_noisy[:, -1:] - x_start) / (1 / alpha_t - 1).sqrt()
+
                 print(f"x_start range: [{x_start.min():.4f}, {x_start.max():.4f}]")
 
                 if step_idx == 0:  # Final step
                     x_pred = x_start
                 else:
-                    noise_pred = v[:, -1:]
-                    x_pred = (
-                        torch.sqrt(alpha_next) * x_start
-                        + torch.sqrt(1 - alpha_next) * noise_pred
-                    )
+                    # Use x_noise for next step prediction
+                    x_pred = alpha_next.sqrt() * x_start + (1 - alpha_next).sqrt() * x_noise
 
                 print(f"x_pred range: [{x_pred.min():.4f}, {x_pred.max():.4f}]")
 
@@ -579,9 +576,9 @@ class DiffusionTrainer:
             alpha_next = self.alphas_cumprod[t_next_last]
 
             # Use the variance-preserving formulation like in training_step
-            x_start = (1 / torch.sqrt(alpha_t)) * (
-                x_noisy[:, -1:] - torch.sqrt(1 - alpha_t) * v[:, -1:]
-            )
+            x_start = alpha_t.sqrt() * x_noisy[:, -1:] - (1 - alpha_t).sqrt() * v[:, -1:]
+            x_noise = ((1 / alpha_t).sqrt() * x_noisy[:, -1:] - x_start) / (1 / alpha_t - 1).sqrt()
+
 
             print(f"\nStep {step_idx}:")
             print(
@@ -593,25 +590,19 @@ class DiffusionTrainer:
 
             print(f"x_start range: [{x_start.min():.4f}, {x_start.max():.4f}]")
 
-            if step_idx == 1:  # Final step
+            if step_idx == 0:  # Final step
                 x_pred = x_start
             else:
-                # Predict noise for next timestep
-                noise_pred = v[:, -1:]
-                # Use DDIM-style update
-                x_pred = (
-                    torch.sqrt(alpha_next) * x_start
-                    + torch.sqrt(1 - alpha_next) * noise_pred
-                )
+                # Use x_noise for next step prediction
+                x_pred = alpha_next.sqrt() * x_start + (1 - alpha_next).sqrt() * x_noise
 
             print(f"x_pred range: [{x_pred.min():.4f}, {x_pred.max():.4f}]")
-
             # Visualize intermediate steps
             visualize_step(
                 self,
                 x_curr=latents[:1],
                 x_noisy=x_noisy[:1],
-                noise=torch.cat([ctx_noise, noise], axis=1)[:1],
+                noise=torch.cat([ctx_noise, noise], dim=1)[:1],  # Make sure noise is properly shaped
                 v=v[:1],
                 pred=torch.cat([x_noisy[:, :-1], x_pred], dim=1)[
                     :1
@@ -668,7 +659,7 @@ class DiffusionTrainer:
             start_frame = max(0, i + 1 - self.max_frames)  # Always 0 in our data
 
             use_max_noise = (  # I keep this for debugging. It's not used in training
-                False  # torch.rand(1).item() < 1.2  # 20% chance to use max noise
+                True  # torch.rand(1).item() < 1.2  # 20% chance to use max noise
             )
 
             if use_max_noise:
@@ -719,8 +710,8 @@ class DiffusionTrainer:
                 noise, -self.config.noise_abs_max, self.config.noise_abs_max
             )
             x_noisy[:, -1:] = (
-                self.alphas_cumprod[t[:, -1:]].sqrt() * x_curr[:, -1:]
-                + (1 - self.alphas_cumprod[t[:, -1:]]).sqrt() * noise
+                self.alphas_cumprod[t[:, -1:]].sqrt() * x_curr[:, -1:] +
+                (1 - self.alphas_cumprod[t[:, -1:]]).sqrt() * noise
             )
 
             # Model prediction
@@ -732,32 +723,35 @@ class DiffusionTrainer:
             if visualize:
                 with torch.no_grad():
                     t_last = t[:, -1:]
-                    x_start = torch.zeros_like(x_curr)
-                    x_start[:, :-1] = x_noisy[:, :-1]
-
-                    # Calculate reconstruction with proper scaling
                     alpha_t = self.alphas_cumprod[t_last]
-                    beta_t = 1 - alpha_t
-
-                    # Use the variance-preserving formulation
-                    # This formulation is more stable for both high and low noise levels
-                    x_start[:, -1:] = (
-                        1
-                        / torch.sqrt(alpha_t)
-                        * (x_noisy[:, -1:] - torch.sqrt(beta_t) * v[:, -1:])
-                    )
-
-                    print(f"Reconstruction debug:")
-                    print(f"t_last: {t_last.tolist()}")
+                
+                    # Calculate x_start and x_noise separately for visualization
+                    print(f"Train Reconstruction debug:")
                     print(f"alpha_t: {alpha_t.tolist()}")
+                    print(f"alpha_t.sqrt(): {alpha_t.sqrt().tolist()}")
+
+                    print(f"1 - alpha_t: {(1 - alpha_t).tolist()}")
+                    print(f"(1 - alpha_t).sqrt(): {(1 - alpha_t).sqrt().tolist()}")
+
                     print(
                         f"x_noisy range: [{x_noisy[:,-1:].min():.4f}, {x_noisy[:,-1:].max():.4f}]"
                     )
+                    
+                    x_start = alpha_t.sqrt() * x_noisy[:, -1:] - (1 - alpha_t).sqrt() * v[:, -1:]
+                    
                     print(f"v range: [{v[:,-1:].min():.4f}, {v[:,-1:].max():.4f}]")
                     print(f"x_start range: [{x_start.min():.4f}, {x_start.max():.4f}]")
                     print(
                         f"x_curr range: [{x_curr[:, -1:].min():.4f}, {x_curr[:, -1:].max():.4f}]"
                     )
+
+                   
+                    #x_noise = ((1 / alpha_t).sqrt() * x_noisy[:, -1:] - x_start) / (1 / alpha_t - 1).sqrt()
+
+                    # Prepare visualization tensor
+                    x_recon = torch.zeros_like(x_curr)
+                    x_recon[:, :-1] = x_noisy[:, :-1]  # Keep context frames
+                    x_recon[:, -1:] = x_start  # Use denoised prediction
 
                     visualize_step(
                         self,
@@ -765,7 +759,7 @@ class DiffusionTrainer:
                         x_noisy=x_noisy[:1],
                         noise=torch.cat([ctx_noise, noise], axis=1)[:1],
                         v=v[:1],
-                        pred=x_start[:1],
+                        pred=x_recon[:1],
                         step=i,
                         scaling_factor=0.07843137255,
                         name=f"{self.config.model_name}_training_step_{global_step}.png",
@@ -822,7 +816,7 @@ class DiffusionTrainer:
             global_step = 0
 
             # Evaluate model before training
-
+            """
             val_losses = self.validation(val_loader)
             avg_val_loss = sum(d["loss"] for d in val_losses) / len(val_losses)
 
@@ -841,7 +835,7 @@ class DiffusionTrainer:
                 global_step=global_step,
             )
             self.predict_noise(val_loader, epoch=0, global_step=global_step)
-
+            """
             for epoch in range(self.config.num_epochs):
                 accumulated_loss = 0.0  # Add accumulator
                 for step, batch in enumerate(train_loader):
@@ -923,7 +917,7 @@ class DiffusionTrainer:
                                         "step": global_step,
                                     }
                                 )
-                            """
+                           
                             self.predict(
                                 val_loader,
                                 epoch=0,
@@ -932,7 +926,7 @@ class DiffusionTrainer:
                             self.predict_noise(
                                 val_loader, epoch=0, global_step=global_step
                             )
-
+                            """
                         # Save checkpoint
                         if (
                             global_step > 0
