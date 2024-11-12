@@ -1,10 +1,10 @@
 vae_checkpoint: checkpoints/vit-l-20.pt
-pretrained_model: checkpoints/oasis500m.pt
+pretrained_model: #checkpoints/dit_dummy_epoch_1_1300.pt
 model_name: dit_dummy
-learning_rate: 1e-6
-min_learning_rate: 1e-7
-warnup_ratio: 0.001
-batch_size: 32
+learning_rate: 1e-4
+min_learning_rate: 1e-5
+warnup_ratio: 0.00
+batch_size: 8
 gradient_accumulation_steps: 1
 validation_batch_size: 8
 dataset_type: dummy
@@ -14,7 +14,7 @@ weight_decay: 0.01
 num_epochs: 100
 max_steps: -1  
 validation_steps: 100
-save_every: 500
+save_every: 100
 output_dir: checkpoints
 logging_steps: 5
 
@@ -24,6 +24,6 @@ use_wandb: true
 ddim_noise_steps:  16
 ctx_max_noise_idx:  3 
 noise_abs_max: 20.0
-n_prompt_frames: 1
+n_prompt_frames: 4
 
 use_action_conditioning: false

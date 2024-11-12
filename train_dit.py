@@ -18,11 +18,12 @@ import wandb
 from hf_dataset import ImageDataset as HfDataset
 from model.dit import DiT_models
 from model.vae import VAE_models
-from utils import sigmoid_beta_schedule
+from utils import sigmoid_beta_schedule, cosine_beta_schedule, linear_beta_schedule
 from web_dataset import ImageDataset as WebDataset
 from dummy_dataset import ImageDataset as DummyDataset
 from web_dataset import split_len
 from torchvision.io import write_video
+from utils import visualize_step
 
 
 @dataclass
@@ -158,8 +159,8 @@ class DiffusionTrainer:
         )
 
         # Compile models for faster training (PyTorch 2.0+)
-        self.dit = torch.compile(self.dit)
-        self.vae = torch.compile(self.vae)
+        # self.dit = torch.compile(self.dit)
+        # self.vae = torch.compile(self.vae)
 
         # Pre-compute and cache device tensors
         self.register_buffers()
@@ -168,7 +169,7 @@ class DiffusionTrainer:
         """Pre-compute and cache tensors on device"""
         # Setup diffusion parameters
         self.max_noise_level = 1000
-        self.betas = sigmoid_beta_schedule(self.max_noise_level).to(
+        self.betas = cosine_beta_schedule(self.max_noise_level).to(
             self.accelerator.device
         )
         self.alphas = 1.0 - self.betas
@@ -216,117 +217,103 @@ class DiffusionTrainer:
             self.config.validation_batch_size * self.accelerator.num_processes
         )
 
-        with torch.autocast(
-            "cuda",
-            enabled=True,
-            dtype=torch.bfloat16
-            if self.accelerator.mixed_precision == "bf16"
-            else torch.float16,
-        ):
-            with tqdm(
-                total=total_steps,
-                desc="Validation",
-                disable=not self.accelerator.is_local_main_process,
-            ) as pbar:
-                for batch in val_loader:
-                    frames = batch["video"]
-                    if self.config.use_action_conditioning:
-                        actions = batch["actions"]
+
+        with tqdm(
+            total=total_steps,
+            desc="Validation",
+            disable=not self.accelerator.is_local_main_process,
+        ) as pbar:
+            for batch in val_loader:
+                frames = batch["video"]
+                if self.config.use_action_conditioning:
+                    actions = batch["actions"]
+                else:
+                    actions = None
+
+                batch_size = frames.shape[0]
+                total_frames = frames.shape[1]
+                total_loss = 0.0
+
+                # Similar logic to training_step but without gradient computation
+                latents = self.encode_frames(frames)
+
+                for i in range(self.config.n_prompt_frames, total_frames):
+                    x_input = latents[:, : i + 1]
+                    if actions is not None:
+                        actions_input = actions[:, : i + 1]
                     else:
-                        actions = None
+                        actions_input = None
+                    start_frame = max(
+                        0, i + 1 - self.max_frames
+                    )  # Always 0 in our data
 
-                    batch_size = frames.shape[0]
-                    total_frames = frames.shape[1]
-                    total_loss = 0.0
+                    t = torch.randint(
+                        0,
+                        self.noise_range[-1],
+                        (batch_size, total_frames),
+                        device=self.accelerator.device,
+                    )
 
-                    # Similar logic to training_step but without gradient computation
-                    latents = self.encode_frames(frames)
+                    # Prepare noise levels for context and current frame
+                    t = torch.full(
+                        (batch_size, i + 1),  # Shape matches all frames
+                        self.stabilization_level
+                        - 1,  # Default to context noise level
+                        dtype=torch.long,
+                        device=self.accelerator.device,
+                    )
+                    t[:, :-1] = self.stabilization_level - 1
 
-                    for i in range(self.config.n_prompt_frames, total_frames):
-                        x_input = latents[:, : i + 1]
-                        if actions is not None:
-                            actions_input = actions[:, : i + 1]
-                        else:
-                            actions_input = None
-                        start_frame = max(0, i + 1 - self.max_frames)
+                    # Apply sliding window
+                    x_curr = x_input[:, start_frame:]
+                    t = t[:, start_frame:]
+                    if actions_input is not None:
+                        actions_curr = actions_input[:, start_frame:]
+                    else:
+                        actions_curr = None
 
-                        noise_idx = torch.randint(
-                            1, self.config.ddim_noise_steps + 1, (1,)
-                        ).item()
+                    # Add noise to context frames
+                    ctx_noise = torch.randn_like(x_curr[:, :-1])
+                    ctx_noise = torch.clamp(
+                        ctx_noise, -self.config.noise_abs_max, self.config.noise_abs_max
+                    )
+                    x_noisy = x_curr.clone()
+                    x_noisy[:, :-1] = (
+                        self.alphas_cumprod[t[:, :-1]].sqrt() * x_noisy[:, :-1]
+                        + (1 - self.alphas_cumprod[t[:, :-1]]).sqrt() * ctx_noise
+                    )
 
-                        # Prepare noise levels for context and current frame
-                        t_ctx = torch.full(
-                            (batch_size, i),
-                            self.stabilization_level
-                            - 1,  # Match the prediction loop's noise level
-                            dtype=torch.long,
-                            device=self.accelerator.device,
-                        )
-                        t = torch.full(
-                            (batch_size, 1),
-                            self.noise_range[noise_idx],
-                            dtype=torch.long,
-                            device=self.accelerator.device,
-                        )
-                        t_next = torch.full(
-                            (batch_size, 1),
-                            self.noise_range[noise_idx - 1],
-                            dtype=torch.long,
-                            device=self.accelerator.device,
-                        )
-                        t_next = torch.where(t_next < 0, t, t_next)
-                        t = torch.cat([t_ctx, t], dim=1)
-                        t_next = torch.cat([t_ctx, t_next], dim=1)
-
-                        # Apply sliding window
-                        x_curr = x_input[:, start_frame:]
-                        t = t[:, start_frame:]
-                        t_next = t_next[:, start_frame:]
-                        if actions_input is not None:
-                            actions_curr = actions_input[:, start_frame:]
-                        else:
-                            actions_curr = None
-
-                        # Add noise to context frames
-                        ctx_noise = torch.randn_like(x_curr[:, :-1])
-                        ctx_noise = torch.clamp(
-                            ctx_noise,
-                            -self.config.noise_abs_max,
-                            self.config.noise_abs_max,
-                        )
-                        x_noisy = x_curr.clone()
-                        x_noisy[:, :-1] = (
-                            self.alphas_cumprod[t[:, :-1]].sqrt() * x_noisy[:, :-1]
-                            + (1 - self.alphas_cumprod[t[:, :-1]]).sqrt() * ctx_noise
-                        )
-
-                        # Add noise to current frame
-                        noise = torch.randn_like(x_curr[:, -1:])
-                        noise = torch.clamp(
-                            noise, -self.config.noise_abs_max, self.config.noise_abs_max
-                        )
-                        x_noisy[:, -1:] = (
-                            self.alphas_cumprod[t[:, -1:]].sqrt() * x_noisy[:, -1:]
-                            + (1 - self.alphas_cumprod[t[:, -1:]]).sqrt() * noise
-                        )
-
-                        # Model prediction
+                    # Add noise to current frame
+                    noise = torch.randn_like(x_curr[:, -1:])
+                    noise = torch.clamp(
+                        noise, -self.config.noise_abs_max, self.config.noise_abs_max
+                    )
+                    x_noisy[:, -1:] = (
+                        self.alphas_cumprod[t[:, -1:]].sqrt() * x_curr[:, -1:]
+                        + (1 - self.alphas_cumprod[t[:, -1:]]).sqrt() * noise
+                    )
+                    # Model prediction
+                    with torch.autocast(
+                        "cuda",
+                        enabled=True,
+                        dtype=torch.bfloat16 if self.accelerator.mixed_precision == "bf16" else torch.float16,
+                    ):
                         v = self.dit(x_noisy, t, actions_curr)
 
-                        # The model predicts v (noise), and we can directly compare it with the noise we added
-                        loss = nn.functional.mse_loss(v[:, -1:], noise)
+                    # The model predicts v (noise), and we can directly compare it with the noise we added
+                    loss = nn.functional.mse_loss(v[:, -1:], noise) 
 
-                        total_loss += loss
+                    total_loss += loss
 
-                    avg_loss = total_loss / (total_frames - self.config.n_prompt_frames)
-                    val_losses.append({"loss": avg_loss.item()})
-                    pbar.update(1)
+                avg_loss = total_loss / (total_frames - self.config.n_prompt_frames)
+                val_losses.append({"loss": avg_loss.item()})
+                pbar.update(1)
 
         self.dit.train()
         return val_losses
-
+    
     @torch.inference_mode()
-    def predict(self, test_loader, epoch, global_step, num_frames=4):
+    def predict(self, test_loader, epoch, global_step, num_frames=5):
         """Generate a video from a prompt frame and optional actions"""
         self.dit.eval()
 
@@ -343,66 +330,75 @@ class DiffusionTrainer:
         latents = self.encode_frames(prompt)
         batch_size = latents.shape[0]
         n_prompt_frames = latents.shape[1]
-
-        # Initialize noise schedule for generation
-        noise_range = (
-            torch.linspace(
-                -1, self.max_noise_level - 1, self.config.ddim_noise_steps + 1
-            )
-            .long()
-            .to(self.accelerator.device)
-        )
-
+        print(f"\nStarting prediction with noise range: {self.noise_range.tolist()}")
         # Generation loop
+        print(f"n_prompt_frames: {n_prompt_frames}.. num_frames: {num_frames}")
         for i in tqdm(
             range(n_prompt_frames, num_frames),
             desc="Generating test frames",
             disable=not self.accelerator.is_local_main_process,
         ):
-            # Add noise for new frame
-            chunk = torch.randn(
-                (batch_size, 1, *latents.shape[-3:]), device=self.accelerator.device
-            )
-            chunk = torch.clamp(
-                chunk, -self.config.noise_abs_max, self.config.noise_abs_max
-            )
-            latents = torch.cat([latents, chunk], dim=1)
-            start_frame = max(0, i + 1 - self.max_frames)
+            print(f"\nGenerating frame {i}")
 
-            # Denoise the new frame
-            for noise_idx in reversed(range(1, self.config.ddim_noise_steps + 1)):
-                # Set up noise values
-                t_ctx = torch.full(
-                    (batch_size, i),
+            # Start with pure noise for the new frame
+            x_noisy = latents.clone()
+            # Add noise to last frame using same noise schedule as training
+            ctx_noise = torch.randn_like(x_noisy)
+            ctx_noise = torch.clamp(
+                ctx_noise, -self.config.noise_abs_max, self.config.noise_abs_max
+            )
+
+            # Use stabilization level for context frames like in training
+            t_ctx = torch.full(
+                (batch_size, latents.shape[1]),
+                self.stabilization_level - 1,
+                dtype=torch.long,
+                device=self.accelerator.device,
+            )
+            x_noisy = (
+                self.alphas_cumprod[t_ctx].sqrt() * x_noisy
+                + (1 - self.alphas_cumprod[t_ctx]).sqrt() * ctx_noise
+            )
+
+            new_frame = torch.randn(
+                (batch_size, 1, *latents.shape[2:]), device=self.accelerator.device
+            )
+            new_frame = torch.clamp(
+                new_frame, -self.config.noise_abs_max, self.config.noise_abs_max
+            )
+
+            # Append the new noisy frame to existing context
+            x_noisy = torch.cat([x_noisy, new_frame], dim=1)
+            print(
+                f"Stabilized context frames range: [{x_noisy[:, :-1].min():.4f}, {x_noisy[:, :-1].max():.4f}]"
+            )
+
+            # Progressive denoising of the last frame
+            for step_idx in reversed(range(self.config.ddim_noise_steps + 1)):
+                actual_noise_level = self.noise_range[step_idx]
+                next_step_idx = max(0, step_idx - 1)
+                next_noise_level = self.noise_range[next_step_idx]
+
+                valid_noise_level = max(0, actual_noise_level)
+                valid_next_level = max(0, next_noise_level)
+
+                print(f"\nDenoising step {step_idx}:")
+                print(f"Current noise level: {valid_noise_level}")
+                print(f"Next noise level: {valid_next_level}")
+
+                # Set noise levels for all frames
+                t = torch.full(
+                    (batch_size, x_noisy.shape[1]),
                     self.stabilization_level - 1,
                     dtype=torch.long,
                     device=self.accelerator.device,
                 )
-                t = torch.full(
-                    (batch_size, 1),
-                    noise_range[noise_idx],
-                    dtype=torch.long,
-                    device=self.accelerator.device,
-                )
-                t_next = torch.full(
-                    (batch_size, 1),
-                    noise_range[noise_idx - 1],
-                    dtype=torch.long,
-                    device=self.accelerator.device,
-                )
-                t_next = torch.where(t_next < 0, t, t_next)
-                t = torch.cat([t_ctx, t], dim=1)
-                t_next = torch.cat([t_ctx, t_next], dim=1)
+                t[:, -1] = valid_noise_level
 
-                # Apply sliding window
-                x_curr = latents[:, start_frame:]
-                t = t[:, start_frame:]
-                t_next = t_next[:, start_frame:]
-                actions_curr = (
-                    actions[:, start_frame : i + 1] if actions is not None else None
-                )
+                t_next = t.clone()
+                t_next[:, -1] = valid_next_level
 
-                # Get model predictions
+                # Get model prediction
                 with torch.autocast(
                     "cuda",
                     enabled=True,
@@ -410,24 +406,59 @@ class DiffusionTrainer:
                     if self.accelerator.mixed_precision == "bf16"
                     else torch.float16,
                 ):
-                    v = self.dit(x_curr, t, actions_curr)
-
-                # Compute x_start prediction
-                x_start = (
-                    self.alphas_cumprod[t].sqrt() * x_curr
-                    - (1 - self.alphas_cumprod[t]).sqrt() * v
+                    print(f"x_noisy: {x_noisy.shape}")
+                    print(f"t: {t.shape}")
+                    v = self.dit(x_noisy, t, None)
+                print(
+                    f"Model prediction v range: [{v[:, -1:].min():.4f}, {v[:, -1:].max():.4f}]"
                 )
-                x_noise = ((1 / self.alphas_cumprod[t]).sqrt() * x_curr - x_start) / (
-                    1 / self.alphas_cumprod[t] - 1
-                ).sqrt()
 
-                # Update prediction
-                alpha_next = self.alphas_cumprod[t_next]
-                alpha_next[:, :-1] = torch.ones_like(alpha_next[:, :-1])
-                if noise_idx == 1:
-                    alpha_next[:, -1:] = torch.ones_like(alpha_next[:, -1:])
-                x_pred = alpha_next.sqrt() * x_start + x_noise * (1 - alpha_next).sqrt()
-                latents[:, -1:] = x_pred[:, -1:]
+                # Update prediction for last frame only
+                t_last = t[:, -1:]
+                t_next_last = t_next[:, -1:]
+                alpha_t = self.alphas_cumprod[t_last]
+                alpha_next = self.alphas_cumprod[t_next_last]
+
+                print(f"alpha_t: {alpha_t.item():.4f}")
+                print(f"alpha_next: {alpha_next.item():.4f}")
+
+                x_start = (1 / torch.sqrt(alpha_t)) * (
+                    x_noisy[:, -1:] - torch.sqrt(1 - alpha_t) * v[:, -1:]
+                )
+                print(f"x_start range: [{x_start.min():.4f}, {x_start.max():.4f}]")
+
+                if step_idx == 0:  # Final step
+                    x_pred = x_start
+                else:
+                    noise_pred = v[:, -1:]
+                    x_pred = (
+                        torch.sqrt(alpha_next) * x_start
+                        + torch.sqrt(1 - alpha_next) * noise_pred
+                    )
+
+                print(f"x_pred range: [{x_pred.min():.4f}, {x_pred.max():.4f}]")
+
+                # Update only the last frame
+                x_noisy[:, -1:] = x_pred
+
+                # Visualize intermediate steps
+                visualize_step(
+                    self,
+                    x_curr=x_noisy[:1],
+                    x_noisy=x_noisy[:1],
+                    noise=torch.cat([ctx_noise, new_frame], axis=1)[:1],
+                    v=v[:1],
+                    pred=torch.cat([x_noisy[:, :-1], x_start], dim=1)[:1],
+                    step=global_step,
+                    scaling_factor=0.07843137255,
+                    name=f"{self.config.model_name}_gen_gs_{global_step}_frame_{i}_step_{step_idx}.png",
+                )
+
+            print(
+                f"\nFinal frame {i} range: [{x_noisy[:, -1:].min():.4f}, {x_noisy[:, -1:].max():.4f}]"
+            )
+            # Update the generated frame in latents
+            latents = torch.cat([latents, x_noisy[:, -1:]], dim=1)
 
         # Decode latents to pixels
         scaling_factor = 0.07843137255
@@ -439,8 +470,8 @@ class DiffusionTrainer:
         # Convert to uint8 video
         pixels = torch.clamp(pixels * 255, 0, 255).byte()
 
-        os.makedirs("videos", exist_ok=True)
-        video_path = f"videos/test_{self.config.model_name}_{self.accelerator.process_index}_epoch_{epoch}_gs_{global_step}.mp4"
+        os.makedirs("debug_visualizations", exist_ok=True)
+        video_path = f"debug_visualizations/test_{self.config.model_name}_{self.accelerator.process_index}_epoch_{epoch}_gs_{global_step}.mp4"
         write_video(
             video_path,
             pixels[0].cpu(),
@@ -450,6 +481,7 @@ class DiffusionTrainer:
 
         self.dit.train()
 
+    @torch.inference_mode()
     def predict_noise(self, test_loader, epoch, global_step):
         """Generate a video by adding noise to the last frame and then denoising it"""
         self.dit.eval()
@@ -462,65 +494,75 @@ class DiffusionTrainer:
         # Encode frames to latent space
         latents = self.encode_frames(prompt)
         batch_size = latents.shape[0]
-        
+
         # Create a copy for noisy version
         x_noisy = latents.clone()
-        
-        # Add stabilized noise to context frames (all frames except the last one)
-        t_ctx = torch.full(
-            (batch_size, latents.shape[1] - 1),  # All frames except last
-            self.stabilization_level - 1,
-            dtype=torch.long,
-            device=self.accelerator.device,
-        )
+
+        # Add stabilized noise to context frames with the same noise level used in training
         ctx_noise = torch.randn_like(x_noisy[:, :-1])
         ctx_noise = torch.clamp(
             ctx_noise, -self.config.noise_abs_max, self.config.noise_abs_max
+        )
+
+        # Use stabilization level for context frames like in training
+        t_ctx = torch.full(
+            (batch_size, latents.shape[1] - 1),
+            self.stabilization_level - 1,
+            dtype=torch.long,
+            device=self.accelerator.device,
         )
         x_noisy[:, :-1] = (
             self.alphas_cumprod[t_ctx].sqrt() * x_noisy[:, :-1]
             + (1 - self.alphas_cumprod[t_ctx]).sqrt() * ctx_noise
         )
 
-        # Add maximum noise to last frame
+        # Add noise to last frame using same noise schedule as training
         noise = torch.randn_like(x_noisy[:, -1:])
-        noise = torch.clamp(
-            noise, -self.config.noise_abs_max, self.config.noise_abs_max
-        )
-        # Use maximum noise level for the last frame
-        max_noise_t = torch.full(
+        actual_noise_level = self.noise_range[-1]
+        t_last = torch.full(
             (batch_size, 1),
-            self.noise_range[-1],  # Use maximum noise level
+            actual_noise_level,
             dtype=torch.long,
             device=self.accelerator.device,
         )
+
+        # Add initial noise
+        alpha_t = self.alphas_cumprod[t_last]
         x_noisy[:, -1:] = (
-            self.alphas_cumprod[max_noise_t].sqrt() * x_noisy[:, -1:]
-            + (1 - self.alphas_cumprod[max_noise_t]).sqrt() * noise
+            alpha_t.sqrt() * x_noisy[:, -1:] + (1 - alpha_t).sqrt() * noise
         )
 
-        # Progressive denoising of the last frame
-        for noise_idx in reversed(range(1, self.config.ddim_noise_steps + 1)):
-            # Current and next noise levels for the last frame
+        # Progressive denoising of the last frame only
+        for step_idx in reversed(range(self.config.ddim_noise_steps + 1)):
+            actual_noise_level = self.noise_range[step_idx]
+
+            next_step_idx = max(0, step_idx - 1)
+            next_noise_level = self.noise_range[next_step_idx]
+
+            # Ensure we use valid indices for alphas_cumprod
+            valid_noise_level = max(0, actual_noise_level)  # Can't use negative indices
+            valid_next_level = max(0, next_noise_level)
+
             t = torch.full(
-                (batch_size, 1),
-                self.noise_range[noise_idx],
+                (batch_size, latents.shape[1]),
+                self.stabilization_level - 1,
                 dtype=torch.long,
                 device=self.accelerator.device,
             )
-            t_next = torch.full(
-                (batch_size, 1),
-                self.noise_range[noise_idx - 1],
-                dtype=torch.long,
-                device=self.accelerator.device,
-            )
-            t_next = torch.where(t_next < 0, t, t_next)
+            t[:, -1] = valid_noise_level
 
-            # Combine timesteps for all frames
-            t_full = torch.cat([t_ctx, t], dim=1)
-            t_next_full = torch.cat([t_ctx, t_next], dim=1)
+            t_next = t.clone()
+            t_next[:, -1] = valid_next_level
 
-            # Get model predictions
+            # Print debug info at start
+            if step_idx == self.config.ddim_noise_steps:
+                print(f"\nInitial noise level: {actual_noise_level}")
+                print(
+                    f"Initial alpha_t: {self.alphas_cumprod[actual_noise_level].item()}"
+                )
+                print(f"Noise range steps: {self.noise_range.tolist()}")
+
+            # Get model prediction
             with torch.autocast(
                 "cuda",
                 enabled=True,
@@ -528,47 +570,63 @@ class DiffusionTrainer:
                 if self.accelerator.mixed_precision == "bf16"
                 else torch.float16,
             ):
-                v = self.dit(x_noisy, t_full, None)
+                v = self.dit(x_noisy, t, None)
 
-            # Compute predicted x_start
-            x_start = (
-                self.alphas_cumprod[t_full].sqrt() * x_noisy
-                - (1 - self.alphas_cumprod[t_full]).sqrt() * v
+            # Update prediction for last frame only
+            t_last = t[:, -1:]
+            t_next_last = t_next[:, -1:]
+            alpha_t = self.alphas_cumprod[t_last]
+            alpha_next = self.alphas_cumprod[t_next_last]
+
+            # Use the variance-preserving formulation like in training_step
+            x_start = (1 / torch.sqrt(alpha_t)) * (
+                x_noisy[:, -1:] - torch.sqrt(1 - alpha_t) * v[:, -1:]
             )
 
-            # Update prediction for next step
-            alpha_next = self.alphas_cumprod[t_next_full]
-            if noise_idx == 1:  # Final step
-                alpha_next[:, -1:] = torch.ones_like(alpha_next[:, -1:])
-            x_pred = alpha_next.sqrt() * x_start
+            print(f"\nStep {step_idx}:")
+            print(
+                f"x_noisy range: [{x_noisy[:,-1:].min():.4f}, {x_noisy[:,-1:].max():.4f}]"
+            )
+            print(f"v range: [{v[:,-1:].min():.4f}, {v[:,-1:].max():.4f}]")
+            print(f"alpha_t: {alpha_t.tolist()}")
+            print(f"alpha_next: {alpha_next.tolist()}")
 
-            # Only update the last frame, keep context frames stable
-            x_noisy[:, -1:] = x_pred[:, -1:]
+            print(f"x_start range: [{x_start.min():.4f}, {x_start.max():.4f}]")
 
-        # Decode latents to pixels
-        scaling_factor = 0.07843137255
-        latents = rearrange(x_noisy, "b t c h w -> (b t) (h w) c")
-            
-        with torch.no_grad():
-            pixels = (self.vae.decode(latents / scaling_factor) + 1) / 2
-        
-    # Correct rearrangement with actual number of frames
-        pixels = rearrange(pixels, "(b t) c h w -> b t h w c", b=1, t=5)
+            if step_idx == 1:  # Final step
+                x_pred = x_start
+            else:
+                # Predict noise for next timestep
+                noise_pred = v[:, -1:]
+                # Use DDIM-style update
+                x_pred = (
+                    torch.sqrt(alpha_next) * x_start
+                    + torch.sqrt(1 - alpha_next) * noise_pred
+                )
 
-        # Save video
-        pixels = torch.clamp(pixels * 255, 0, 255).byte()
-        os.makedirs("videos", exist_ok=True)
-        video_path = f"videos/test_noise_{self.config.model_name}_{self.accelerator.process_index}_epoch_{epoch}_gs_{global_step}.mp4"
-        write_video(
-            video_path,
-            pixels[0].cpu(),
-            fps=10,
-        )
-        print(f"generation saved to {video_path}.")
+            print(f"x_pred range: [{x_pred.min():.4f}, {x_pred.max():.4f}]")
+
+            # Visualize intermediate steps
+            visualize_step(
+                self,
+                x_curr=latents[:1],
+                x_noisy=x_noisy[:1],
+                noise=torch.cat([ctx_noise, noise], axis=1)[:1],
+                v=v[:1],
+                pred=torch.cat([x_noisy[:, :-1], x_pred], dim=1)[
+                    :1
+                ],  # Keep context frames unchanged
+                step=global_step,
+                scaling_factor=0.07843137255,
+                name=f"{self.config.model_name}_noise_gs_{global_step}_pred_step_{step_idx}.png",
+            )
+
+            # Only update the last frame
+            x_noisy[:, -1:] = x_pred
 
         self.dit.train()
 
-    def training_step(self, frames, actions):
+    def training_step(self, frames, actions, global_step, visualize: bool = False):
         """Single training step with context-aware noise scheduling"""
 
         if not hasattr(self, "_first_step_done"):
@@ -597,47 +655,48 @@ class DiffusionTrainer:
         total_loss = 0.0
 
         # Process frames sequentially after context frames
-        for i in range(self.config.n_prompt_frames, total_frames):
-            # Get input frames up to current frame
+        for i in range(self.config.n_prompt_frames, total_frames):  # 1 .. 4
             x_input = latents[:, : i + 1]
             if actions is not None:
                 actions_input = actions[:, : i + 1]
             else:
                 actions_input = None
 
+            # print(f"x_input: {x_input.shape}")
+
             # Calculate start frame for sliding window
-            start_frame = max(0, i + 1 - self.max_frames)
+            start_frame = max(0, i + 1 - self.max_frames)  # Always 0 in our data
 
-            # Sample noise indices
-            noise_idx = torch.randint(1, self.config.ddim_noise_steps + 1, (1,)).item()
+            use_max_noise = (  # I keep this for debugging. It's not used in training
+                False  # torch.rand(1).item() < 1.2  # 20% chance to use max noise
+            )
 
-            # Prepare noise levels for context and current frame
-            t_ctx = torch.full(
-                (batch_size, i),
-                self.stabilization_level - 1,  # Match the prediction loop's noise level
-                dtype=torch.long,
-                device=self.accelerator.device,
-            )
-            t = torch.full(
-                (batch_size, 1),
-                self.noise_range[noise_idx],
-                dtype=torch.long,
-                device=self.accelerator.device,
-            )
-            t_next = torch.full(
-                (batch_size, 1),
-                self.noise_range[noise_idx - 1],
-                dtype=torch.long,
-                device=self.accelerator.device,
-            )
-            t_next = torch.where(t_next < 0, t, t_next)
-            t = torch.cat([t_ctx, t], dim=1)
-            t_next = torch.cat([t_ctx, t_next], dim=1)
+            if use_max_noise:
+                # Use maximum noise level for target frames
+
+                t = torch.full(
+                    (batch_size, total_frames),
+                    self.noise_range[-1],  # Maximum noise level
+                    dtype=torch.long,
+                    device=self.accelerator.device,
+                )
+            else:
+                # Random noise levels as before
+                t = torch.randint(
+                    0,
+                    self.noise_range[-1],
+                    (batch_size, total_frames),
+                    device=self.accelerator.device,
+                )
+
+            # Set context frames to stabilization level
+            t[:, :-1] = self.stabilization_level - 1
+
+            # print(f"t_next: {t_next.shape}. {t_next}")
 
             # Apply sliding window
             x_curr = x_input[:, start_frame:]
             t = t[:, start_frame:]
-            t_next = t_next[:, start_frame:]
             if actions_input is not None:
                 actions_curr = actions_input[:, start_frame:]
             else:
@@ -660,7 +719,7 @@ class DiffusionTrainer:
                 noise, -self.config.noise_abs_max, self.config.noise_abs_max
             )
             x_noisy[:, -1:] = (
-                self.alphas_cumprod[t[:, -1:]].sqrt() * x_noisy[:, -1:]
+                self.alphas_cumprod[t[:, -1:]].sqrt() * x_curr[:, -1:]
                 + (1 - self.alphas_cumprod[t[:, -1:]]).sqrt() * noise
             )
 
@@ -670,14 +729,53 @@ class DiffusionTrainer:
             # The model predicts v (noise), and we can directly compare it with the noise we added
             loss = nn.functional.mse_loss(v[:, -1:], noise)
 
+            if visualize:
+                with torch.no_grad():
+                    t_last = t[:, -1:]
+                    x_start = torch.zeros_like(x_curr)
+                    x_start[:, :-1] = x_noisy[:, :-1]
+
+                    # Calculate reconstruction with proper scaling
+                    alpha_t = self.alphas_cumprod[t_last]
+                    beta_t = 1 - alpha_t
+
+                    # Use the variance-preserving formulation
+                    # This formulation is more stable for both high and low noise levels
+                    x_start[:, -1:] = (
+                        1
+                        / torch.sqrt(alpha_t)
+                        * (x_noisy[:, -1:] - torch.sqrt(beta_t) * v[:, -1:])
+                    )
+
+                    print(f"Reconstruction debug:")
+                    print(f"t_last: {t_last.tolist()}")
+                    print(f"alpha_t: {alpha_t.tolist()}")
+                    print(
+                        f"x_noisy range: [{x_noisy[:,-1:].min():.4f}, {x_noisy[:,-1:].max():.4f}]"
+                    )
+                    print(f"v range: [{v[:,-1:].min():.4f}, {v[:,-1:].max():.4f}]")
+                    print(f"x_start range: [{x_start.min():.4f}, {x_start.max():.4f}]")
+                    print(
+                        f"x_curr range: [{x_curr[:, -1:].min():.4f}, {x_curr[:, -1:].max():.4f}]"
+                    )
+
+                    visualize_step(
+                        self,
+                        x_curr=x_curr[:1],
+                        x_noisy=x_noisy[:1],
+                        noise=torch.cat([ctx_noise, noise], axis=1)[:1],
+                        v=v[:1],
+                        pred=x_start[:1],
+                        step=i,
+                        scaling_factor=0.07843137255,
+                        name=f"{self.config.model_name}_training_step_{global_step}.png",
+                    )
+
             # Accumulate loss
             total_loss += loss
 
             # Scale the loss back down for backward pass
-            scaled_loss = loss / (
-                (total_frames - self.config.n_prompt_frames)
-                * self.config.gradient_accumulation_steps
-            )
+            scaled_loss = loss / self.config.gradient_accumulation_steps
 
             # Backward pass for each frame
             self.accelerator.backward(scaled_loss)
@@ -695,7 +793,7 @@ class DiffusionTrainer:
                 self.config.output_dir,
                 f"{self.config.model_name}_epoch_{epoch+1}_{global_step}.pt",
             )
-            # Fix: Save DiT model state dict instead of VAE
+
             self.accelerator.save(
                 self.accelerator.unwrap_model(self.dit).state_dict(), checkpoint_path
             )
@@ -724,6 +822,7 @@ class DiffusionTrainer:
             global_step = 0
 
             # Evaluate model before training
+
             val_losses = self.validation(val_loader)
             avg_val_loss = sum(d["loss"] for d in val_losses) / len(val_losses)
 
@@ -757,7 +856,19 @@ class DiffusionTrainer:
                     else:
                         actions = None
 
-                    loss = self.training_step(frames, actions)
+                    visualize = (
+                        not hasattr(self, "_first_step_done")  # First step
+                        or (
+                            global_step > 0  # Past first step
+                            and global_step % self.config.validation_steps
+                            == 0  # Validation time
+                            and (step + 1) % self.config.gradient_accumulation_steps
+                            == 0  # Grad accumulation complete
+                        )
+                    )
+                    loss = self.training_step(
+                        frames, actions, global_step, visualize=visualize
+                    )
                     accumulated_loss += loss  # Accumulate loss
 
                     # Update weights after gradient accumulation steps
@@ -795,6 +906,7 @@ class DiffusionTrainer:
                             global_step > 0
                             and global_step % self.config.validation_steps == 0
                         ):
+                            """
                             val_losses = self.validation(val_loader)
                             avg_val_loss = sum(d["loss"] for d in val_losses) / len(
                                 val_losses
@@ -811,7 +923,7 @@ class DiffusionTrainer:
                                         "step": global_step,
                                     }
                                 )
-
+                            """
                             self.predict(
                                 val_loader,
                                 epoch=0,

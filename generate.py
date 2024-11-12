@@ -144,27 +144,23 @@ def main():
         start_frame = max(0, i + 1 - model.max_frames)
 
         for noise_idx in reversed(range(1, ddim_noise_steps + 1)):
-            t_ctx = torch.full(
-                (B, i),
-                stabilization_level - 1,
-                dtype=torch.long,
-                device=accelerator.device,
-            )
             t = torch.full(
-                (B, 1),
-                noise_range[noise_idx],
+                (B, i + 1),  # Shape matches all frames
+                stabilization_level - 1,  # Default to context noise level
                 dtype=torch.long,
                 device=accelerator.device,
             )
             t_next = torch.full(
-                (B, 1),
-                noise_range[noise_idx - 1],
+                (B, i + 1),
+                stabilization_level - 1,
                 dtype=torch.long,
                 device=accelerator.device,
             )
-            t_next = torch.where(t_next < 0, t, t_next)
-            t = torch.cat([t_ctx, t], dim=1)
-            t_next = torch.cat([t_ctx, t_next], dim=1)
+
+            # Set noise levels for the last frame only
+            t[:, -1] = noise_range[noise_idx]
+            t_next[:, -1] = noise_range[noise_idx - 1]
+            t_next = torch.where(t_next < 0, t, t_next)  # Handle boundary case
 
             # Apply sliding window
             x_curr = x.clone()[:, start_frame:]
@@ -175,19 +171,14 @@ def main():
                 with autocast("cuda", dtype=torch.bfloat16):
                     v = model(x_curr, t)  # ,  actions[:, start_frame : i + 1])
 
-            x_start = (
-                alphas_cumprod[t].sqrt() * x_curr - (1 - alphas_cumprod[t]).sqrt() * v
-            )
-            x_noise = ((1 / alphas_cumprod[t]).sqrt() * x_curr - x_start) / (
-                1 / alphas_cumprod[t] - 1
-            ).sqrt()
+            x_start = (x_curr - (1 - alphas_cumprod[t]).sqrt() * v) / alphas_cumprod[t].sqrt()
 
             # get frame prediction
             alpha_next = alphas_cumprod[t_next]
             alpha_next[:, :-1] = torch.ones_like(alpha_next[:, :-1])
             if noise_idx == 1:
                 alpha_next[:, -1:] = torch.ones_like(alpha_next[:, -1:])
-            x_pred = alpha_next.sqrt() * x_start + x_noise * (1 - alpha_next).sqrt()
+            x_pred = alpha_next.sqrt() * x_start + v * (1 - alpha_next).sqrt()
             x[:, -1:] = x_pred[:, -1:]
 
     # Decode and save video
