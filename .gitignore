@@ -139,3 +139,5 @@ wandb/
 .slurm/DIT_train.out.txt
 
 videos/
+
+debug_*/

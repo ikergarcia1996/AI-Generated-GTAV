@@ -7,14 +7,14 @@ warnup_ratio: 0.00
 batch_size: 8
 gradient_accumulation_steps: 1
 validation_batch_size: 8
-dataset_type: dummy
+dataset_type: webdataset
 
 weight_decay: 0.01
 
-num_epochs: 100
+num_epochs: 3
 max_steps: -1  
-validation_steps: 100
-save_every: 100
+validation_steps: 500
+save_every: 500
 output_dir: checkpoints
 logging_steps: 5
 
