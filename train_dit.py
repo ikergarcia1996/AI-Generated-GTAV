@@ -621,6 +621,7 @@ class DiffusionTrainer:
 
             logging.info(f"x_start range: [{x_start.min():.4f}, {x_start.max():.4f}]")
 
+            x_noisy_old = x_noisy.clone()
             if step_idx == 0:  # Final step
                 x_pred = x_start
             else:
@@ -637,7 +638,7 @@ class DiffusionTrainer:
             visualize_step(
                 self,
                 x_curr=latents[:1],
-                x_noisy=x_noisy[:1],
+                x_noisy=x_noisy_old[:1],
                 noise=torch.cat([ctx_noise, noise], dim=1)[
                     :1
                 ],  # Make sure noise is properly shaped
