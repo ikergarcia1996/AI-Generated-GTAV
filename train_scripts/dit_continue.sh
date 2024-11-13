@@ -23,4 +23,4 @@ export OMP_NUM_THREADS=32
 
 echo CUDA_VISIBLE_DEVICES "${CUDA_VISIBLE_DEVICES}"
 
-accelerate launch --mixed_precision bf16 train_dit.py configs/dit_config_dummy.yaml
+accelerate launch --mixed_precision bf16 train_dit.py configs/dit_config_continue.yaml
