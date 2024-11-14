@@ -4,7 +4,7 @@ model_name: dit
 learning_rate: 1e-4
 min_learning_rate: 1e-5
 warnup_ratio: 0.05
-batch_size: 32
+batch_size: 16
 gradient_accumulation_steps: 1
 validation_batch_size: 8
 dataset_type: hfdataset

@@ -4,7 +4,7 @@
 #SBATCH --job-name=DIT
 #SBATCH --cpus-per-task=32
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:2
 #SBATCH --constraint=a100
 #SBATCH --mem=300G
 #SBATCH --output=.slurm/DIT.out.txt

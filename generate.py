@@ -18,7 +18,7 @@ from model.vae import VAE_models
 from utils import sigmoid_beta_schedule
 from web_dataset import ImageDataset
 from generate_og import load_prompt
-
+from train_dit import denoise_step
 torch.manual_seed(0)
 torch.cuda.manual_seed(0)
 
@@ -106,8 +106,9 @@ def main():
     assert torch.cuda.is_available()
 
     accelerator = Accelerator(
-        mixed_precision="bf16",
+        mixed_precision="bf16" if torch.cuda.is_bf16_supported() else "fp16"
     )
+    dtype = torch.bfloat16 if accelerator.mixed_precision == "bf16" else torch.float16
 
     # Initialize models and parameters
     model, vae = load_models(accelerator, args.dit_model_path, args.vae_model_path)
@@ -133,7 +134,7 @@ def main():
 
     max_noise_level = 1000
     ddim_noise_steps = args.noise_steps
-    noise_range = torch.linspace(-1, max_noise_level - 1, ddim_noise_steps + 1)
+    noise_range = torch.linspace(0, max_noise_level - 1, ddim_noise_steps + 1)
     noise_abs_max = 20
     stabilization_level = 15
     betas = sigmoid_beta_schedule(max_noise_level).float().to(accelerator.device)
@@ -147,53 +148,17 @@ def main():
         x = torch.cat([x, chunk], dim=1)
         start_frame = max(0, i + 1 - model.max_frames)
 
-        for noise_idx in reversed(range(1, ddim_noise_steps + 1)):
-            t_ctx = torch.full(
-                (B, x.shape[1] - 1),
-                stabilization_level - 1,
-                dtype=torch.long,
-                device=accelerator.device,
+        for noise_idx in reversed(range(0, ddim_noise_steps + 1)):
+            x_pred, v_pred = denoise_step(
+                dit_model=model,
+                x_noisy=x,
+                noise_idx=noise_idx,
+                stabilization_level=stabilization_level,
+                noise_range=noise_range,
+                alphas_cumprod=alphas_cumprod,
+                start_frame=start_frame,
+                dtype=dtype,
             )
-            t = torch.full(
-                (B, 1),
-                noise_range[noise_idx],
-                dtype=torch.long,
-                device=accelerator.device,
-            )
-
-            t_next = torch.full(
-                (B, 1),
-                noise_range[noise_idx - 1],
-                dtype=torch.long,
-                device=accelerator.device,
-            )
-            t_next = torch.where(t_next < 0, t, t_next)
-            t = torch.cat([t_ctx, t], dim=1)
-            t_next = torch.cat([t_ctx, t_next], dim=1)
-
-            x_curr = x.clone()
-            x_curr = x_curr[:, start_frame:]
-            t = t[:, start_frame:]
-            t_next = t_next[:, start_frame:]
-
-            with autocast("cuda", dtype=torch.bfloat16):
-                v_pred = model(x_curr, t)  # ,  actions[:, start_frame : i + 1])
-
-            alpha_t = alphas_cumprod[t]
-            x_start = alpha_t.sqrt() * x_curr - (1 - alpha_t).sqrt() * v_pred
-            x_noise = ((1 / alpha_t).sqrt() * x_curr - x_start) / (
-                1 / alpha_t - 1
-            ).sqrt()
-
-            alpha_next = alphas_cumprod[t_next]
-            alpha_next[:, :-1] = torch.ones_like(alpha_next[:, :-1])
-
-            if noise_idx == 1:  # Final step
-                alpha_next[:, -1:] = torch.ones_like(alpha_next[:, -1:])
-
-            # Compute prediction
-            x_pred = alpha_next.sqrt() * x_start + (1 - alpha_next).sqrt() * x_noise
-
             # Update only the last frame
             x[:, -1:] = x_pred[:, -1:]
 
