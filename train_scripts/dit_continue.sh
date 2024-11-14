@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --partition=general
+#SBATCH --partition=preemption
 #SBATCH --qos=xlong
 #SBATCH --job-name=DIT_continue
 #SBATCH --cpus-per-task=32

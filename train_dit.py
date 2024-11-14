@@ -856,7 +856,7 @@ class DiffusionTrainer:
             global_step = 0
 
             # Evaluate model before training
-            """
+            
             val_losses = self.validation(val_loader)
             avg_val_loss = sum(d["loss"] for d in val_losses) / len(val_losses)
 
@@ -875,7 +875,7 @@ class DiffusionTrainer:
                 global_step=global_step,
             )
             self.predict_noise(val_loader, epoch=0, global_step=global_step)
-            """
+            
             for epoch in range(self.config.num_epochs):
                 accumulated_loss = 0.0  # Add accumulator
                 for step, batch in enumerate(train_loader):
@@ -940,7 +940,7 @@ class DiffusionTrainer:
                             global_step > 0
                             and global_step % self.config.validation_steps == 0
                         ):
-                            """
+                            
                             val_losses = self.validation(val_loader)
                             avg_val_loss = sum(d["loss"] for d in val_losses) / len(
                                 val_losses
@@ -957,7 +957,7 @@ class DiffusionTrainer:
                                         "step": global_step,
                                     }
                                 )
-                            """
+                            
                             self.predict(
                                 val_loader,
                                 epoch=0,
