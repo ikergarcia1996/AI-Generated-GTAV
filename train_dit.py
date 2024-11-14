@@ -100,7 +100,7 @@ def denoise_step(
         enabled=True,
         dtype=dtype,
     ):
-        v_pred = dit_model(x_noisy, t, None)
+        v_pred = dit_model(x_curr, t, None)
 
     # Calculate denoising steps
     alpha_t = alphas_cumprod[t]
