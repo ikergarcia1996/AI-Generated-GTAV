@@ -19,6 +19,7 @@ from utils import sigmoid_beta_schedule
 from web_dataset import ImageDataset
 from generate_og import load_prompt
 
+
 @torch.inference_mode
 def load_models(accelerator: Accelerator, dit_model_path: str, vae_model_path: str):
     # Load DiT model
@@ -62,7 +63,7 @@ def vae_encode(x, vae, n_prompt_frames, scaling_factor=0.07843137255):
         h=H // vae.patch_size,
         w=W // vae.patch_size,
     )
-    #print(x)
+    # print(x)
     return x
 
 
@@ -144,52 +145,64 @@ def main():
         start_frame = max(0, i + 1 - model.max_frames)
 
         for noise_idx in reversed(range(1, ddim_noise_steps + 1)):
-            t = torch.full(
-                (B, i + 1),  # Shape matches all frames
-                stabilization_level - 1,  # Default to context noise level
-                dtype=torch.long,
-                device=accelerator.device,
-            )
-            t_next = torch.full(
-                (B, i + 1),
+            actual_noise_level = noise_range[noise_idx]
+            next_noise_level = noise_range[max(0, noise_idx - 1)]
+            t_ctx = torch.full(
+                (B, x.shape[1] - 1),
                 stabilization_level - 1,
                 dtype=torch.long,
                 device=accelerator.device,
             )
+            t_target = torch.full(
+                (B, 1),
+                actual_noise_level,
+                dtype=torch.long,
+                device=accelerator.device,
+            )
 
-            # Set noise levels for the last frame only
-            t[:, -1] = noise_range[noise_idx]
-            t_next[:, -1] = noise_range[noise_idx - 1]
-            t_next = torch.where(t_next < 0, t, t_next)  # Handle boundary case
+            t = torch.cat([t_ctx, t_target], dim=1)
 
-            # Apply sliding window
-            x_curr = x.clone()[:, start_frame:]
+            t_next_target = torch.full(
+                (B, 1),
+                next_noise_level,
+                dtype=torch.long,
+                device=accelerator.device,
+            )
+            t_next = torch.cat([t_ctx, t_next_target], dim=1)
+
+            x_curr = x.clone()
+            x_curr = x_curr[:, start_frame:]
             t = t[:, start_frame:]
             t_next = t_next[:, start_frame:]
 
-            with torch.no_grad():
-                with autocast("cuda", dtype=torch.bfloat16):
-                    v = model(x_curr, t)  # ,  actions[:, start_frame : i + 1])
+            with autocast("cuda", dtype=torch.bfloat16):
+                v_pred = model(x_curr, t)  # ,  actions[:, start_frame : i + 1])
 
-            x_start = (x_curr - (1 - alphas_cumprod[t]).sqrt() * v) / alphas_cumprod[t].sqrt()
+            alpha_t = alphas_cumprod[t]
+            x_start = alpha_t.sqrt() * x_curr - (1 - alpha_t).sqrt() * v_pred
+            x_noise = ((1 / alpha_t).sqrt() * x_curr - x_start) / (1 / alpha_t - 1).sqrt()
 
-            # get frame prediction
             alpha_next = alphas_cumprod[t_next]
             alpha_next[:, :-1] = torch.ones_like(alpha_next[:, :-1])
-            if noise_idx == 1:
+
+            if noise_idx == 0:  # Final step
                 alpha_next[:, -1:] = torch.ones_like(alpha_next[:, -1:])
-            x_pred = alpha_next.sqrt() * x_start + v * (1 - alpha_next).sqrt()
+
+            # Compute prediction
+            x_pred = alpha_next.sqrt() * x_start + (1 - alpha_next).sqrt() * x_noise
+
+            # Update only the last frame
             x[:, -1:] = x_pred[:, -1:]
 
     # Decode and save video
     x = rearrange(x, "b t c h w -> (b t) (h w) c")
-    #print(x)
+    # print(x)
     with torch.no_grad(), autocast("cuda", dtype=torch.bfloat16):
         x = (vae.decode(x / 0.07843137255) + 1) / 2
     x = rearrange(x, "(b t) c h w -> b t h w c", t=total_frames)
 
     x = torch.clamp(x * 255, 0, 255).byte()
-    #print(x)
+    # print(x)
     write_video("video.mp4", x[0].cpu(), fps=20)
     print("generation saved to video.mp4.")
 
