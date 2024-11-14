@@ -350,9 +350,9 @@ class DiffusionTrainer:
             actions = None
 
         # Encode prompt with VAE
-        latents = self.encode_frames(prompt)
-        batch_size = latents.shape[0]
-        n_prompt_frames = latents.shape[1]
+        x = self.encode_frames(prompt)
+        batch_size = x.shape[0]
+        n_prompt_frames = x.shape[1]
         logging.info(
             f"\nStarting prediction with noise range: {self.noise_range.tolist()}"
         )
@@ -366,48 +366,45 @@ class DiffusionTrainer:
             logging.info(f"\nGenerating frame {i}")
 
             new_frame = torch.randn(
-                (batch_size, 1, *latents.shape[2:]), device=self.accelerator.device
+                (batch_size, 1, *x.shape[2:]), device=self.accelerator.device
             )
             new_frame = torch.clamp(
                 new_frame, -self.config.noise_abs_max, self.config.noise_abs_max
             )
 
             # Append the new noisy frame to existing context
-            latents = torch.cat([latents, new_frame], dim=1)
+            x = torch.cat([x, new_frame], dim=1)
             logging.info(
-                f"Stabilized context frames range: [{latents[:, :-1].min():.4f}, {latents[:, :-1].max():.4f}]"
+                f"Stabilized context frames range: [{x[:, :-1].min():.4f}, {x[:, :-1].max():.4f}]"
             )
             start_frame = max(0, i + 1 - self.dit.max_frames)
             # Progressive denoising of the last frame
-            for step_idx in reversed(range(self.config.ddim_noise_steps + 1)):
-                actual_noise_level = self.noise_range[step_idx]
-                next_noise_level = self.noise_range[max(0, step_idx - 1)]
-
-                # Separate context and target timesteps
+            for noise_idx in reversed(range(self.config.ddim_noise_steps + 1)):
                 t_ctx = torch.full(
-                    (batch_size, latents.shape[1] - 1),
+                    (batch_size, x.shape[1] - 1),
                     self.stabilization_level - 1,
                     dtype=torch.long,
                     device=self.accelerator.device,
                 )
-                t_target = torch.full(
+                t = torch.full(
                     (batch_size, 1),
-                    actual_noise_level,
+                    self.noise_range[noise_idx],
                     dtype=torch.long,
                     device=self.accelerator.device,
                 )
-                t = torch.cat([t_ctx, t_target], dim=1)
 
-                # Handle next timestep similarly
-                t_next_target = torch.full(
+                t_next = torch.full(
                     (batch_size, 1),
-                    next_noise_level,
+                    self.noise_range[noise_idx - 1],
                     dtype=torch.long,
                     device=self.accelerator.device,
                 )
-                t_next = torch.cat([t_ctx, t_next_target], dim=1)
-                
-                x_curr = latents[:, start_frame:].clone()
+                t_next = torch.where(t_next < 0, t, t_next)
+                t = torch.cat([t_ctx, t], dim=1)
+                t_next = torch.cat([t_ctx, t_next], dim=1)
+
+                x_curr = x.clone()
+                x_curr = x_curr[:, start_frame:]
                 t = t[:, start_frame:]
                 t_next = t_next[:, start_frame:]
                 
@@ -415,23 +412,23 @@ class DiffusionTrainer:
                 with torch.autocast("cuda", enabled=True, dtype=torch.bfloat16 if self.accelerator.mixed_precision == "bf16" else torch.float16):
                     v_pred = self.dit(x_curr, t, None)
 
-                # Compute x_start and x_noise for all frames
                 alpha_t = self.alphas_cumprod[t]
                 x_start = alpha_t.sqrt() * x_curr - (1 - alpha_t).sqrt() * v_pred
-                x_noise = ((1 / alpha_t).sqrt() * x_curr - x_start) / (1 / alpha_t - 1).sqrt()
+                x_noise = ((1 / alpha_t).sqrt() * x_curr - x_start) / (
+                    1 / alpha_t - 1
+                ).sqrt()
 
-                # Set context alphas to 1
                 alpha_next = self.alphas_cumprod[t_next]
                 alpha_next[:, :-1] = torch.ones_like(alpha_next[:, :-1])
-                
-                if step_idx == 0:  # Final step
+
+                if noise_idx == 1:  # Final step
                     alpha_next[:, -1:] = torch.ones_like(alpha_next[:, -1:])
-                
+
                 # Compute prediction
                 x_pred = alpha_next.sqrt() * x_start + (1 - alpha_next).sqrt() * x_noise
-                
+
                 # Update only the last frame
-                latents[:, -1:] = x_pred[:, -1:]
+                x[:, -1:] = x_pred[:, -1:]
 
                 # Visualize intermediate steps
                 """
@@ -449,14 +446,14 @@ class DiffusionTrainer:
                 """
 
             logging.info(
-                f"\nFinal frame {i} range: [{latents[:, -1:].min():.4f}, {latents[:, -1:].max():.4f}]"
+                f"\nFinal frame {i} range: [{x[:, -1:].min():.4f}, {x[:, -1:].max():.4f}]"
             )
 
         # Decode latents to pixels
         scaling_factor = 0.07843137255
-        latents = rearrange(latents, "b t c h w -> (b t) (h w) c")
+        x = rearrange(x, "b t c h w -> (b t) (h w) c")
         with torch.no_grad():
-            pixels = (self.vae.decode(latents / scaling_factor) + 1) / 2
+            pixels = (self.vae.decode(x / scaling_factor) + 1) / 2
         pixels = rearrange(pixels, "(b t) c h w -> b t h w c", t=num_frames)
 
         # Convert to uint8 video

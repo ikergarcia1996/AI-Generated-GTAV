@@ -19,6 +19,9 @@ from utils import sigmoid_beta_schedule
 from web_dataset import ImageDataset
 from generate_og import load_prompt
 
+torch.manual_seed(0)
+torch.cuda.manual_seed(0)
+
 
 @torch.inference_mode
 def load_models(accelerator: Accelerator, dit_model_path: str, vae_model_path: str):
@@ -42,8 +45,8 @@ def load_models(accelerator: Accelerator, dit_model_path: str, vae_model_path: s
     vae_model.load_state_dict(vae_ckpt)
 
     dit_model, vae_model = accelerator.prepare(dit_model, vae_model)
-    dit_model = torch.compile(dit_model)
-    vae_model = torch.compile(vae_model)
+    # dit_model = torch.compile(dit_model)
+    # vae_model = torch.compile(vae_model)
 
     return dit_model, vae_model
 
@@ -145,30 +148,28 @@ def main():
         start_frame = max(0, i + 1 - model.max_frames)
 
         for noise_idx in reversed(range(1, ddim_noise_steps + 1)):
-            actual_noise_level = noise_range[noise_idx]
-            next_noise_level = noise_range[max(0, noise_idx - 1)]
             t_ctx = torch.full(
                 (B, x.shape[1] - 1),
                 stabilization_level - 1,
                 dtype=torch.long,
                 device=accelerator.device,
             )
-            t_target = torch.full(
+            t = torch.full(
                 (B, 1),
-                actual_noise_level,
+                noise_range[noise_idx],
                 dtype=torch.long,
                 device=accelerator.device,
             )
 
-            t = torch.cat([t_ctx, t_target], dim=1)
-
-            t_next_target = torch.full(
+            t_next = torch.full(
                 (B, 1),
-                next_noise_level,
+                noise_range[noise_idx - 1],
                 dtype=torch.long,
                 device=accelerator.device,
             )
-            t_next = torch.cat([t_ctx, t_next_target], dim=1)
+            t_next = torch.where(t_next < 0, t, t_next)
+            t = torch.cat([t_ctx, t], dim=1)
+            t_next = torch.cat([t_ctx, t_next], dim=1)
 
             x_curr = x.clone()
             x_curr = x_curr[:, start_frame:]
@@ -180,12 +181,14 @@ def main():
 
             alpha_t = alphas_cumprod[t]
             x_start = alpha_t.sqrt() * x_curr - (1 - alpha_t).sqrt() * v_pred
-            x_noise = ((1 / alpha_t).sqrt() * x_curr - x_start) / (1 / alpha_t - 1).sqrt()
+            x_noise = ((1 / alpha_t).sqrt() * x_curr - x_start) / (
+                1 / alpha_t - 1
+            ).sqrt()
 
             alpha_next = alphas_cumprod[t_next]
             alpha_next[:, :-1] = torch.ones_like(alpha_next[:, :-1])
 
-            if noise_idx == 0:  # Final step
+            if noise_idx == 1:  # Final step
                 alpha_next[:, -1:] = torch.ones_like(alpha_next[:, -1:])
 
             # Compute prediction
@@ -203,8 +206,8 @@ def main():
 
     x = torch.clamp(x * 255, 0, 255).byte()
     # print(x)
-    write_video("video.mp4", x[0].cpu(), fps=20)
-    print("generation saved to video.mp4.")
+    write_video("video1.mp4", x[0].cpu(), fps=20)
+    print("generation saved to video1.mp4.")
 
 
 if __name__ == "__main__":

@@ -197,7 +197,7 @@ def main(args):
         h=H // vae.patch_size,
         w=W // vae.patch_size,
     )
-    print(x)
+    # print(x)
     x = x[:, :n_prompt_frames]
 
     # get alphas
@@ -237,8 +237,7 @@ def main(args):
             # get model predictions
             with torch.no_grad():
                 with autocast("cuda", dtype=torch.half):
-                  
-                    v = model(x_curr, t)#,  actions[:, start_frame : i + 1])
+                    v = model(x_curr, t)  # ,  actions[:, start_frame : i + 1])
 
             x_start = (
                 alphas_cumprod[t].sqrt() * x_curr - (1 - alphas_cumprod[t]).sqrt() * v
@@ -257,7 +256,7 @@ def main(args):
 
     # vae decoding
     x = rearrange(x, "b t c h w -> (b t) (h w) c")
-    print(x)
+    # print(x)
     with torch.no_grad():
         with autocast("cuda", dtype=torch.half):
             x = (vae.decode(x / scaling_factor) + 1) / 2
@@ -266,7 +265,7 @@ def main(args):
     # save video
     x = torch.clamp(x, 0, 1)
     x = (x * 255).byte()
-    print(x)
+    # print(x)
     write_video(args.output_path, x[0].cpu(), fps=args.fps)
     print(f"generation saved to {args.output_path}.")
 
