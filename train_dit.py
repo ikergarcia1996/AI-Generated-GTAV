@@ -420,6 +420,7 @@ class DiffusionTrainer:
         prompt = next(iter(test_loader))
         prompt = prompt["video"]
         prompt = prompt[:1]  # Take first batch only
+        num_frames = prompt.shape[1]  # Get actual number of frames
 
         # Encode frames to latent space
         latents = self.encode_frames(prompt)
@@ -460,7 +461,7 @@ class DiffusionTrainer:
         x_noisy[:, -1:] = (
             alpha_t.sqrt() * x_noisy[:, -1:] + (1 - alpha_t).sqrt() * noise
         )
-        start_frame = max(0, x_noisy.shape[1] - self.dit.max_frames)
+        start_frame = max(0, num_frames - self.dit.max_frames)
         # Progressive denoising of the last frame only
         for noise_idx in reversed(range(0, self.config.ddim_noise_steps + 1)):
             x_noisy_old = x_noisy.clone()
@@ -487,9 +488,7 @@ class DiffusionTrainer:
                     :1
                 ],  # Make sure noise is properly shaped
                 v=v_pred[:1],
-                pred=torch.cat([x_noisy[:, :-1], x_pred], dim=1)[
-                    :1
-                ],  # Keep context frames unchanged
+                pred=x_pred[:1],  # Keep context frames unchanged
                 step=global_step,
                 scaling_factor=0.07843137255,
                 name=f"{self.config.model_name}_noise_gs_{global_step}_pred_step_{noise_idx}.png",
@@ -497,7 +496,9 @@ class DiffusionTrainer:
 
         self.dit.train()
 
-    def _shared_step(self, frames, actions, visualize=False, is_training=True):
+    def _shared_step(
+        self, frames, actions, global_step, visualize=False, is_training=True
+    ):
         """
         Shared logic between training and validation steps
         """
@@ -607,7 +608,7 @@ class DiffusionTrainer:
                         pred=x_recon[:1],
                         step=i,
                         scaling_factor=0.07843137255,
-                        name=f"{self.config.model_name}_{'training' if is_training else 'validation'}_step_{i}.png",
+                        name=f"{self.config.model_name}_{'training' if is_training else 'validation'}_step_{global_step}.png",
                     )
 
             total_loss += loss
@@ -638,10 +639,12 @@ class DiffusionTrainer:
             self._first_step_done = True
 
         self.optimizer.zero_grad()
-        return self._shared_step(frames, actions, visualize=visualize, is_training=True)
+        return self._shared_step(
+            frames, actions, global_step, visualize=visualize, is_training=True
+        )
 
     @torch.inference_mode()
-    def validation(self, val_loader):
+    def validation(self, val_loader, global_step):
         """Run validation loop"""
         self.dit.eval()
         val_losses = []
@@ -661,7 +664,11 @@ class DiffusionTrainer:
                     batch["actions"] if self.config.use_action_conditioning else None
                 )
                 loss = self._shared_step(
-                    frames, actions, visualize=False, is_training=False
+                    frames,
+                    actions,
+                    global_step=global_step,
+                    visualize=False,
+                    is_training=False,
                 )
                 val_losses.append({"loss": loss.item()})
                 pbar.update(1)
@@ -710,7 +717,7 @@ class DiffusionTrainer:
 
             # Evaluate model before training
 
-            val_losses = self.validation(val_loader)
+            val_losses = self.validation(val_loader, global_step)
             avg_val_loss = sum(d["loss"] for d in val_losses) / len(val_losses)
 
             if self.accelerator.is_main_process and self.config.use_wandb:
@@ -793,7 +800,7 @@ class DiffusionTrainer:
                             global_step > 0
                             and global_step % self.config.validation_steps == 0
                         ):
-                            val_losses = self.validation(val_loader)
+                            val_losses = self.validation(val_loader, global_step)
                             avg_val_loss = sum(d["loss"] for d in val_losses) / len(
                                 val_losses
                             )
