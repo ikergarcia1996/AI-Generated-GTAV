@@ -10,7 +10,7 @@ from torchvision.utils import make_grid
 import os
 import logging
 
-def sigmoid_beta_schedule(timesteps, start=-3, end=3, tau=1, clamp_min=1e-4):
+def sigmoid_beta_schedule_clamped(timesteps, start=-3, end=3, tau=1, clamp_min=1e-4):
     """
     sigmoid schedule
     proposed in https://arxiv.org/abs/2212.11972 - Figure 8
@@ -27,6 +27,41 @@ def sigmoid_beta_schedule(timesteps, start=-3, end=3, tau=1, clamp_min=1e-4):
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return torch.clip(betas, 0, 0.999)
 
+def sigmoid_beta_schedule(timesteps, start=-3, end=3, tau=1.0, clamp_min=1e-4):
+    """
+    sigmoid schedule
+    proposed in https://arxiv.org/abs/2212.11972 - Figure 8
+    better for images > 64x64, when used during training
+    """
+    steps = timesteps + 1
+    t = torch.linspace(0, timesteps, steps, dtype=torch.float64) / timesteps
+    v_start = torch.tensor(start / tau).sigmoid()
+    v_end = torch.tensor(end / tau).sigmoid()
+    
+    # Incorporate minimum value directly in the calculation
+    alphas_cumprod = (-((t * (end - start) + start) / tau).sigmoid() + v_end) / (v_end - v_start)
+    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+    # Scale the values to range [clamp_min, 1] instead of using clamp
+    alphas_cumprod = alphas_cumprod * (1 - clamp_min) + clamp_min
+    
+    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+    return torch.clip(betas, 0, 0.999)
+
+
+def sigmoid_beta_schedule_og(timesteps, start=-3, end=3, tau=1):
+    """
+    sigmoid schedule
+    proposed in https://arxiv.org/abs/2212.11972 - Figure 8
+    better for images > 64x64, when used during training
+    """
+    steps = timesteps + 1
+    t = torch.linspace(0, timesteps, steps, dtype=torch.float64) / timesteps
+    v_start = torch.tensor(start / tau).sigmoid()
+    v_end = torch.tensor(end / tau).sigmoid()
+    alphas_cumprod = (-((t * (end - start) + start) / tau).sigmoid() + v_end) / (v_end - v_start)
+    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+    return torch.clip(betas, 0, 0.999)
 
 def cosine_beta_schedule(timesteps, s=0.008):
     """
@@ -67,7 +102,7 @@ def linear_beta_schedule(timesteps, beta_start=1e-4, beta_end=0.02):
     return betas
 
 @torch.inference_mode()
-def visualize_step(self, x_curr, x_noisy, noise, v, pred=None, step=0, scaling_factor=0.07843137255, name:str = None):
+def visualize_step(x_curr, x_noisy, noise, v, step, vae, alphas_cumprod, pred=None, scaling_factor=0.07843137255, name:str = None):
     """Helper function to visualize intermediate steps"""
     # logging.info shape and value statistics for debugging
     logging.info(f"\nDebug information for step {step}:")
@@ -89,7 +124,7 @@ def visualize_step(self, x_curr, x_noisy, noise, v, pred=None, step=0, scaling_f
     def decode_latents(lat):
         lat = rearrange(lat, "b t c h w -> (b t) (h w) c")
         with torch.no_grad():
-            decoded = (self.vae.decode(lat / scaling_factor) + 1) / 2
+            decoded = (vae.decode(lat / scaling_factor) + 1) / 2
             # Ensure values are in [0, 1]
             decoded = torch.clamp(decoded, 0, 1)
         return decoded.cpu()
@@ -107,8 +142,8 @@ def visualize_step(self, x_curr, x_noisy, noise, v, pred=None, step=0, scaling_f
         
         # Correct reconstruction formula
         x_start = (
-            x_noisy - (1 - self.alphas_cumprod[t]).sqrt() * v
-        ) / self.alphas_cumprod[t].sqrt()
+            x_noisy - (1 - alphas_cumprod[t]).sqrt() * v
+        ) / alphas_cumprod[t].sqrt()
         
         # Decode denoised images
         denoised_imgs = decode_latents(x_start)

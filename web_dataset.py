@@ -19,20 +19,6 @@ def split_len(split: str) -> int:
     return {"train": 1270669, "validation": 4040, "test": 4588}[split]
 
 
-def action_to_one_hot(action: int) -> torch.tensor:
-    """
-    Converts actions to one-hot encoded vectors
-
-    Args:
-        action (int): Action value
-
-    Returns:
-        torch.tensor: One-hot encoded actions of shape (5, 10).
-    """
-    actions_tensor = torch.tensor([0, 0, 0, 0, action], dtype=torch.long)
-    return torch.nn.functional.one_hot(actions_tensor, num_classes=10)
-
-
 def actions_to_one_hot(actions: List[int]) -> torch.tensor:
     """
     Converts actions to one-hot encoded vectors using torch.scatter_.
@@ -45,9 +31,10 @@ def actions_to_one_hot(actions: List[int]) -> torch.tensor:
         torch.tensor: One-hot encoded actions of shape (len(actions), 9).
     """
     actions_tensor = torch.tensor(actions)
-    actions_tensor += 1  # to handle -1 values
-    one_hot = torch.zeros(len(actions), 10, dtype=torch.long)
-    one_hot.scatter_(1, actions_tensor.unsqueeze(1), 1)
+    one_hot = torch.zeros(len(actions), 9,dtype=torch.long)
+    mask = actions_tensor >= 0  # Changed from != -1 for clarity
+    if mask.any():
+        one_hot[torch.arange(len(actions))[mask], actions_tensor[mask]] = 1
     return one_hot
 
 
@@ -130,8 +117,8 @@ class ImageDataset(IterableDataset):
             )
             .shuffle(1000)  # Add shuffle buffer
             .decode("pil")  # Decode as PIL Image
-            .to_tuple("jpg", "cls")
-            .map(lambda x: (transform(x[0]), x[1]))  # Apply transforms to image only
+            .to_tuple("jpg", "cls", "json")
+            .map(lambda x: (transform(x[0]), x[1], x[2]))  # Pass through all three values
         )
 
         print(f"Loaded dataset for {split} split with {len(files)} tar files")
@@ -147,9 +134,9 @@ class ImageDataset(IterableDataset):
         """
         Returns a sample from the dataset.
         """
-        for img, cls in self.dataset:
+        for img, cls, json_data in self.dataset:
             if self.return_actions:
-                actions = action_to_one_hot(cls)
+                actions = actions_to_one_hot(json_data["actions_int"])
                 yield {"video": img, "actions": actions}
             else:
                 yield {"video": img}

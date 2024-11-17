@@ -3,7 +3,7 @@ from datasets import load_dataset
 from torch.utils.data import Dataset
 from torchvision import transforms
 
-from web_dataset import SplitImages, action_to_one_hot
+from web_dataset import SplitImages, actions_to_one_hot
 
 
 class ImageDataset(Dataset):
@@ -35,7 +35,7 @@ class ImageDataset(Dataset):
         img = self.transform(sample["jpg"])
 
         if self.return_actions:
-            actions = action_to_one_hot(sample["label"])
+            actions = actions_to_one_hot(sample["json"]["actions_int"])
             return {"video": img, "actions": actions}
         else:
             return {"video": img}
@@ -46,7 +46,7 @@ class ImageDataset(Dataset):
             img = self.transform(sample["image"])
 
             if self.return_actions:
-                actions = action_to_one_hot(sample["label"])
+                actions = actions_to_one_hot(sample["json"]["actions_int"])
                 yield {"video": img, "actions": actions}
             else:
                 yield {"video": img}

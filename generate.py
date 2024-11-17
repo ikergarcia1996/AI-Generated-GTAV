@@ -19,8 +19,10 @@ from utils import sigmoid_beta_schedule
 from web_dataset import ImageDataset
 from generate_og import load_prompt
 from train_dit import denoise_step
+
 torch.manual_seed(0)
 torch.cuda.manual_seed(0)
+from utils import visualize_step
 
 
 @torch.inference_mode
@@ -159,8 +161,22 @@ def main():
                 start_frame=start_frame,
                 dtype=dtype,
             )
+            x_old = x.clone()
             # Update only the last frame
             x[:, -1:] = x_pred[:, -1:]
+            if noise_idx == 0:
+                visualize_step(
+                    x_curr=x_old[:, start_frame:],
+                    x_noisy=x[:, start_frame:],
+                    noise=x[:, start_frame:],
+                    v=v_pred,
+                    step=noise_idx,
+                    vae=vae,
+                    alphas_cumprod=alphas_cumprod,
+                    pred=x_pred,
+                    scaling_factor=0.07843137255,
+                    name=f"frame_{i}",
+                )
 
     # Decode and save video
     x = rearrange(x, "b t c h w -> (b t) (h w) c")
