@@ -24,7 +24,7 @@ use_wandb: true
 
 ddim_noise_steps:  8
 ddim_noise_steps_inference: 16
-ctx_max_noise_idx:  2 
+ctx_max_noise_idx:  4 
 noise_abs_max: 20.0
 n_prompt_frames: 4
 

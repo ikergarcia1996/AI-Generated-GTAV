@@ -102,8 +102,9 @@ def linear_beta_schedule(timesteps, beta_start=1e-4, beta_end=0.02):
     return betas
 
 @torch.inference_mode()
-def visualize_step(x_curr, x_noisy, noise, v, step, vae, alphas_cumprod, pred=None, scaling_factor=0.07843137255, name:str = None):
+def visualize_step(x_curr, x_noisy, noise, v, step, vae, alphas_cumprod, pred=None, scaling_factor=0.07843137255, name:str = None, dtype=torch.bfloat16):
     """Helper function to visualize intermediate steps"""
+
     # logging.info shape and value statistics for debugging
     logging.info(f"\nDebug information for step {step}:")
     logging.info(
@@ -123,11 +124,15 @@ def visualize_step(x_curr, x_noisy, noise, v, step, vae, alphas_cumprod, pred=No
     # Helper function to convert latents to images
     def decode_latents(lat):
         lat = rearrange(lat, "b t c h w -> (b t) (h w) c")
-        with torch.no_grad():
+        with torch.autocast(
+        "cuda",
+        enabled=True,
+        dtype=dtype,
+        ):
             decoded = (vae.decode(lat / scaling_factor) + 1) / 2
             # Ensure values are in [0, 1]
             decoded = torch.clamp(decoded, 0, 1)
-        return decoded.cpu()
+        return decoded.cpu().float()
 
     # 1. Original sequence
     orig_imgs = decode_latents(x_curr)
@@ -172,8 +177,8 @@ def visualize_step(x_curr, x_noisy, noise, v, step, vae, alphas_cumprod, pred=No
         # Noise visualization (directly show the noise tensor)
  
         noise_vis = noise[:, t]  # Get noise for current timestep
-        noise_grid = make_grid(noise_vis, nrow=1).permute(1, 2, 0).mean(-1).cpu()  # Average RGB channels after making grid
-        im = axes[2, t].imshow(noise_grid, cmap="RdBu", interpolation="nearest")
+        noise_grid = make_grid(noise_vis.float(), nrow=1).permute(1, 2, 0).mean(-1).cpu()  # Average RGB channels after making grid
+        im = axes[2, t].imshow(noise_grid.float(), cmap="RdBu", interpolation="nearest")
         plt.colorbar(im, ax=axes[2, t])
         axes[2, t].set_title(
             f"Noise Frame {t}\nRange: [{noise_grid.min():.3f}, {noise_grid.max():.3f}]"

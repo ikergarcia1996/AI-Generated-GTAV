@@ -35,7 +35,7 @@ def actions_to_one_hot(actions: List[int]) -> torch.tensor:
     mask = actions_tensor >= 0  # Changed from != -1 for clarity
     if mask.any():
         one_hot[torch.arange(len(actions))[mask], actions_tensor[mask]] = 1
-    return one_hot
+    return one_hot.float()
 
 
 class SplitImages(object):

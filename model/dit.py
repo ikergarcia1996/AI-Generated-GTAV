@@ -385,7 +385,7 @@ def DiT_S_2():
         depth=16,
         num_heads=16,
         max_frames=5,
-        external_cond_dim=0,
+        external_cond_dim=9,
     )
 
 
