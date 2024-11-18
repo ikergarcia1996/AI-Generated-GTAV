@@ -26,11 +26,13 @@ from torchvision.io import write_video
 from utils import visualize_step
 import logging
 
+
 def checkerboard_loss(x):
     # Detect 2x2 checkerboard patterns
     checker_h = x[:, :, ::2, :] + x[:, :, 1::2, :]
     checker_w = x[:, :, :, ::2] + x[:, :, :, 1::2]
     return (checker_h**2).mean() + (checker_w**2).mean()
+
 
 @torch.inference_mode()
 def denoise_step(
@@ -290,13 +292,14 @@ class DiffusionTrainer:
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
         self.alphas_cumprod = rearrange(self.alphas_cumprod, "T -> T 1 1 1")
 
-        self.betas_inference = sigmoid_beta_schedule(self.max_noise_level, clamp_min=0.000001).to(
-            device=self.accelerator.device, dtype=torch.float32
-        )
+        self.betas_inference = sigmoid_beta_schedule(
+            self.max_noise_level, clamp_min=0.000001
+        ).to(device=self.accelerator.device, dtype=torch.float32)
         self.alphas_inference = 1.0 - self.betas_inference
         self.alphas_cumprod_inference = torch.cumprod(self.alphas_inference, dim=0)
-        self.alphas_cumprod_inference = rearrange(self.alphas_cumprod_inference, "T -> T 1 1 1")
-
+        self.alphas_cumprod_inference = rearrange(
+            self.alphas_cumprod_inference, "T -> T 1 1 1"
+        )
 
         # Update diffusion parameters with DDIM-style scheduling
         self.noise_range = (
@@ -395,7 +398,9 @@ class DiffusionTrainer:
             )
             start_frame = max(0, i + 1 - self.dit.max_frames)
             # Progressive denoising of the last frame
-            for noise_idx in reversed(range(0, self.config.ddim_noise_steps_inference + 1)):
+            for noise_idx in reversed(
+                range(0, self.config.ddim_noise_steps_inference + 1)
+            ):
                 x_pred, v_pred = denoise_step(
                     dit_model=self.dit,
                     x_noisy=x,
@@ -572,13 +577,13 @@ class DiffusionTrainer:
 
             start_frame = max(0, i + 1 - self.max_frames)
 
-            #training_progress = min(
+            # training_progress = min(
             #    1.0, global_step / (self.total_training_steps * 0.5)
-            #)  #  Use first half of training for curriculum
-            #max_noise_idx = max(
+            # )  #  Use first half of training for curriculum
+            # max_noise_idx = max(
             #    1, int(training_progress * self.config.ddim_noise_steps)
-            #)  # Start with low noise (1) and gradually increase the maximum allowed noise level
-            #print(f"max_noise_idx: {max_noise_idx}")
+            # )  # Start with low noise (1) and gradually increase the maximum allowed noise level
+            # print(f"max_noise_idx: {max_noise_idx}")
             # Random noise levels for target frame
             target_noise_idx = torch.randint(
                 1,
@@ -587,14 +592,14 @@ class DiffusionTrainer:
                 device=self.accelerator.device,
             )
 
-            #print(target_noise_idx)
+            # print(target_noise_idx)
 
             ### For debugging, set max noise
-            #target_noise_idx = torch.full(
+            # target_noise_idx = torch.full(
             #    (batch_size,),
             #    self.config.ddim_noise_steps-5,
             #    device=self.accelerator.device,
-            #)
+            # )
 
             # Generate separate random noise indices for context frames
             ctx_noise_idx = torch.randint(
@@ -663,24 +668,24 @@ class DiffusionTrainer:
                 loss = nn.functional.mse_loss(v_pred[:, -1:], v_target)
 
                 # 2. Reconstruction loss - predict original image
-                #alpha_t = self.alphas_cumprod[t[:, -1:]]
-                #x_start_pred = (
+                # alpha_t = self.alphas_cumprod[t[:, -1:]]
+                # x_start_pred = (
                 #    alpha_t.sqrt() * x_noisy[:, -1:]
                 #    - (1 - alpha_t).sqrt() * v_pred[:, -1:]
-                #)
+                # )
                 # Clone x_curr to ensure it's not inference-only
-                #x_curr_target = x_curr[:, -1:].clone()
-                #recon_loss = nn.functional.mse_loss(x_start_pred, x_curr_target)
-                #recon_loss_l1 = nn.functional.l1_loss(x_start_pred, x_curr_target)
-                #print(
+                # x_curr_target = x_curr[:, -1:].clone()
+                # recon_loss = nn.functional.mse_loss(x_start_pred, x_curr_target)
+                # recon_loss_l1 = nn.functional.l1_loss(x_start_pred, x_curr_target)
+                # print(
                 #    f"recon_loss: {recon_loss}, recon_loss_l1: {recon_loss_l1}. Noise loss: {noise_loss}"
-                #)
+                # )
                 # Combine losses with weights
-                #loss = 0.2 * (recon_loss + recon_loss_l1) + noise_loss
-                #tv_loss = checkerboard_loss(v_pred[:, -1:])
-                #loss = noise_loss + 0.1 * tv_loss  # Adjust weight as needed
+                # loss = 0.2 * (recon_loss + recon_loss_l1) + noise_loss
+                # tv_loss = checkerboard_loss(v_pred[:, -1:])
+                # loss = noise_loss + 0.1 * tv_loss  # Adjust weight as needed
 
-                #print(f"tv_loss: {tv_loss}, loss: {loss}")
+                # print(f"tv_loss: {tv_loss}, loss: {loss}")
             # print(f"v_pred_range: [{v_pred[:, -1:].min():.4f}, {v_pred[:, -1:].max():.4f}]")
             # print(f"loss: {loss}")
             if visualize:
@@ -688,7 +693,7 @@ class DiffusionTrainer:
                     x_start = (
                         alpha_t.sqrt() * x_noisy[:, -1:]
                         - (1 - alpha_t).sqrt() * v_pred[:, -1:]
-                     )
+                    )
                     # print(f"x_start_range: [{x_start[:, -1:].min():.4f}, {x_start[:, -1:].max():.4f}]")
                     x_recon = torch.zeros_like(x_curr)
                     x_recon[:, :-1] = x_noisy[:, :-1]
@@ -812,10 +817,10 @@ class DiffusionTrainer:
             global_step = 0
 
             # Evaluate model before training
-            """
+
             val_losses = self.validation(val_loader, global_step)
             avg_val_loss = sum(d["loss"] for d in val_losses) / len(val_losses)
-            
+
             if self.accelerator.is_main_process and self.config.use_wandb:
                 wandb.log(
                     {
@@ -824,14 +829,14 @@ class DiffusionTrainer:
                         "step": global_step,
                     }
                 )
-            
+
             self.predict(
                 val_loader,
                 epoch=0,
                 global_step=global_step,
             )
             self.predict_noise(val_loader, epoch=0, global_step=global_step)
-            """
+
             for epoch in range(self.config.num_epochs):
                 accumulated_loss = 0.0  # Add accumulator
                 for step, batch in enumerate(train_loader):
@@ -839,7 +844,9 @@ class DiffusionTrainer:
                         self.config.max_steps > 0
                         and global_step >= self.config.max_steps
                     ):
-                        print(f"Reached max steps: {self.config.max_steps}. Current step: {global_step}")
+                        print(
+                            f"Reached max steps: {self.config.max_steps}. Current step: {global_step}"
+                        )
                         return
                     frames = batch["video"]
                     if self.config.use_action_conditioning:
@@ -897,12 +904,10 @@ class DiffusionTrainer:
                             global_step > 0
                             and global_step % self.config.validation_steps == 0
                         ):
-                            """
                             val_losses = self.validation(val_loader, global_step)
                             avg_val_loss = sum(d["loss"] for d in val_losses) / len(
                                 val_losses
                             )
-                            """
 
                             if (
                                 self.accelerator.is_main_process
@@ -924,7 +929,6 @@ class DiffusionTrainer:
                             self.predict_noise(
                                 val_loader, epoch=0, global_step=global_step
                             )
-                            
 
                         # Save checkpoint
                         if (
@@ -964,7 +968,7 @@ def main():
         )
 
     train_loader = DataLoader(
-        ImageDataset(split="validation", return_actions=config.use_action_conditioning),
+        ImageDataset(split="train", return_actions=config.use_action_conditioning),
         batch_size=config.batch_size,
         num_workers=min(os.cpu_count(), 32),
         prefetch_factor=2,
