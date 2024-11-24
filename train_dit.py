@@ -510,20 +510,16 @@ class DiffusionTrainer:
             alpha_ctx.sqrt() * x_noisy[:, :-1] + (1 - alpha_ctx).sqrt() * ctx_noise
         )
         # Add noise to last frame using same noise schedule as training
-        noise = torch.randn_like(x_noisy[:, -1:])
-        actual_noise_level = self.noise_range[-1]
-        t_last = torch.full(
-            (batch_size, 1),
-            actual_noise_level,
-            dtype=torch.long,
-            device=self.accelerator.device,
-        )
 
-        # Add initial noise
-        alpha_t = self.alphas_cumprod[t_last]
-        x_noisy[:, -1:] = (
-            alpha_t.sqrt() * x_noisy[:, -1:] + (1 - alpha_t).sqrt() * noise
+        new_frame = torch.randn(
+                (batch_size, 1, *x_noisy.shape[2:]), device=self.accelerator.device
+            )
+        new_frame = torch.clamp(
+            new_frame, -self.config.noise_abs_max, self.config.noise_abs_max
         )
+        
+        x_noisy[:, -1:] = new_frame
+
         start_frame = max(0, num_frames - self.dit.max_frames)
         # Progressive denoising of the last frame only
         for noise_idx in reversed(range(0, self.config.ddim_noise_steps_inference + 1)):
@@ -545,7 +541,7 @@ class DiffusionTrainer:
             visualize_step(
                 x_curr=latents[:1],
                 x_noisy=x_noisy_old[:1],
-                noise=torch.cat([ctx_noise, noise], dim=1)[
+                noise=torch.cat([ctx_noise, new_frame], dim=1)[
                     :1
                 ],  # Make sure noise is properly shaped
                 v=v_pred[:1],
@@ -939,6 +935,7 @@ def main():
         prefetch_factor=2,
         persistent_workers=True,
         pin_memory=True,
+        shuffle=config.dataset_type != "webdataet",
     )
 
     val_loader = DataLoader(

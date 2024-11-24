@@ -1,20 +1,20 @@
 vae_checkpoint: checkpoints/vit-l-20.pt
 pretrained_model: #checkpoints/oasis500m.pt
 model_name: dit
-learning_rate: 1e-4
-min_learning_rate: 1e-5
+learning_rate: 1e-3
+min_learning_rate: 1e-4
 warnup_ratio: 0.05
 batch_size: 8
 gradient_accumulation_steps: 1
 validation_batch_size: 8
 dataset_type: dummy
 
-weight_decay: 0.01
+weight_decay: 0.0
 
 
 num_epochs: 1000
 max_steps: 1000
-validation_steps: 100
+validation_steps: 20
 save_every: 2000
 output_dir: checkpoints
 logging_steps: 5
