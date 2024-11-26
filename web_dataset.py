@@ -31,7 +31,7 @@ def actions_to_one_hot(actions: List[int]) -> torch.tensor:
         torch.tensor: One-hot encoded actions of shape (len(actions), 9).
     """
     actions_tensor = torch.tensor(actions)
-    one_hot = torch.zeros(len(actions), 9,dtype=torch.long)
+    one_hot = torch.zeros(len(actions), 25, dtype=torch.long)
     mask = actions_tensor >= 0  # Changed from != -1 for clarity
     if mask.any():
         one_hot[torch.arange(len(actions))[mask], actions_tensor[mask]] = 1
@@ -71,6 +71,7 @@ class ImageDataset(IterableDataset):
         """
         self.return_actions = return_actions
         self.split = split
+        self.current_index = 0  # Add index tracking
 
         # Define split patterns with correct paths
         splits = {
@@ -118,18 +119,19 @@ class ImageDataset(IterableDataset):
             .shuffle(1000)  # Add shuffle buffer
             .decode("pil")  # Decode as PIL Image
             .to_tuple("jpg", "cls", "json")
-            .map(lambda x: (transform(x[0]), x[1], x[2]))  # Pass through all three values
+            .map(
+                lambda x: (transform(x[0]), x[1], x[2])
+            )  # Pass through all three values
         )
 
         print(f"Loaded dataset for {split} split with {len(files)} tar files")
-
 
     def __len__(self):
         """
         Returns the number of examples in the dataset.
         """
         return split_len(self.split)
-    
+
     def __iter__(self):
         """
         Returns a sample from the dataset.
@@ -140,3 +142,16 @@ class ImageDataset(IterableDataset):
                 yield {"video": img, "actions": actions}
             else:
                 yield {"video": img}
+
+    def __getstate__(self):
+        """Save dataset state"""
+        return {
+            "current_index": self.current_index,
+            "split": self.split,
+            "return_actions": self.return_actions,
+        }
+
+    def __setstate__(self, state):
+        """Restore dataset state"""
+        self.__init__(split=state["split"], return_actions=state["return_actions"])
+        self.current_index = state["current_index"]

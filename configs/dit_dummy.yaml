@@ -1,21 +1,21 @@
-vae_checkpoint: checkpoints/vit-l-20.pt
-pretrained_model: #checkpoints/oasis500m.pt
+vae_checkpoint: checkpoints/vit-l-20.safetensors
+pretrained_model: #checkpoints/oasis500m.safetensors
 model_name: dit
-learning_rate: 1e-3
+learning_rate: 1e-4
 min_learning_rate: 1e-4
-warnup_ratio: 0.05
+warnup_ratio: 0.0
 batch_size: 8
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 4
 validation_batch_size: 8
 dataset_type: dummy
 
 weight_decay: 0.0
 
 
-num_epochs: 1000
-max_steps: 1000
+num_epochs: 10000
+max_steps: 100000
 validation_steps: 20
-save_every: 2000
+save_every: 20
 output_dir: checkpoints
 logging_steps: 5
 
@@ -23,11 +23,11 @@ seed: 42
 use_wandb: false
 
 ddim_noise_steps:  8
-ddim_noise_steps_inference: 16
+ddim_noise_steps_inference: 8
 ctx_max_noise_idx:  4 
 noise_abs_max: 20.0
 n_prompt_frames: 4
 
-
+resume_from_checkpoint: True
 
 use_action_conditioning: true

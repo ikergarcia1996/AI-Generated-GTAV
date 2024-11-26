@@ -1,30 +1,30 @@
+import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import Literal
-import torch
 
+import torch
 import torch.nn as nn
 import yaml
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from einops import rearrange
+from safetensors.torch import load_model
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
+from torchvision.io import write_video
 from tqdm import tqdm
 from transformers.optimization import get_cosine_with_min_lr_schedule_with_warmup
 
 import wandb
+from dummy_dataset import ImageDataset as DummyDataset
 from hf_dataset import ImageDataset as HfDataset
 from model.dit import DiT_models
 from model.vae import VAE_models
-from utils import sigmoid_beta_schedule
+from utils import sigmoid_beta_schedule, visualize_step
 from web_dataset import ImageDataset as WebDataset
-from dummy_dataset import ImageDataset as DummyDataset
-from web_dataset import split_len
-from torchvision.io import write_video
-from utils import visualize_step
-import logging
 
 
 def checkerboard_loss(x):
@@ -161,6 +161,7 @@ class TrainingConfig:
     dataset_type: Literal["webdataset", "hfdataset", "dummy"] = "webdataset"
     pretrained_model: str = None
     model_name: str = "dit"
+    resume_from_checkpoint: str = True
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TrainingConfig":
@@ -178,9 +179,12 @@ class TrainingConfig:
 
 
 class DiffusionTrainer:
-    def __init__(self, config):
+    def __init__(self, config, total_dataset_size: int):
         self.config = config
         self.logger = get_logger(__name__)
+
+        self.start_epoch = 0
+        self.global_step = 0
 
         # Initialize accelerator
         self.accelerator = Accelerator(
@@ -217,13 +221,10 @@ class DiffusionTrainer:
                 f"Loading pretrained DiT model from {config.pretrained_model}"
             )
             self.dit = DiT_models["DiT-S/2"]()
-            checkpoint = torch.load(config.pretrained_model, map_location="cpu")
-            # Handle potential state_dict wrapper from accelerate
-            if "state_dict" in checkpoint:
-                checkpoint = checkpoint["state_dict"]
-            missing_keys, unexpected_keys = self.dit.load_state_dict(
-                checkpoint, strict=False
+            missing_keys, unexpected_keys = load_model(
+                self.dit, config.pretrained_model
             )
+            # Handle potential state_dict wrapper from accelerate
             if missing_keys:
                 self.logger.warning(f"Missing keys in checkpoint: {missing_keys}")
             if unexpected_keys:
@@ -234,8 +235,7 @@ class DiffusionTrainer:
         self.max_frames = self.dit.max_frames
 
         # Load VAE checkpoint and freeze
-        vae_ckpt = torch.load(config.vae_checkpoint, map_location="cpu")
-        self.vae.load_state_dict(vae_ckpt)
+        load_model(self.vae, config.vae_checkpoint, device="cpu")
         self.vae.eval()
         for param in self.vae.parameters():
             param.requires_grad = False
@@ -250,7 +250,6 @@ class DiffusionTrainer:
         )
 
         # Calculate total steps for scheduler
-        total_dataset_size = split_len("train")
         self.steps_per_epoch = total_dataset_size // (
             config.batch_size
             * self.accelerator.num_processes
@@ -276,6 +275,8 @@ class DiffusionTrainer:
         self.dit, self.vae, self.optimizer, self.scheduler = self.accelerator.prepare(
             self.dit, self.vae, self.optimizer, self.scheduler
         )
+
+        self.accelerator.register_for_checkpointing(self.scheduler)
 
         # Compile models for faster training (PyTorch 2.0+)
         """
@@ -332,7 +333,7 @@ class DiffusionTrainer:
 
         print(f"noise_range: {self.noise_range}")
 
-        self.stabilization_level = 15
+        self.stabilization_level = self.noise_range[1]
 
     @torch.inference_mode()
     def encode_frames(self, frames, dtype=torch.bfloat16):
@@ -417,6 +418,8 @@ class DiffusionTrainer:
             range(n_prompt_frames, num_frames),
             desc="Generating test frames",
             disable=not self.accelerator.is_local_main_process,
+            position=2,
+            leave=True,
         ):
             logging.info(f"\nGenerating frame {i}")
 
@@ -512,12 +515,12 @@ class DiffusionTrainer:
         # Add noise to last frame using same noise schedule as training
 
         new_frame = torch.randn(
-                (batch_size, 1, *x_noisy.shape[2:]), device=self.accelerator.device
-            )
+            (batch_size, 1, *x_noisy.shape[2:]), device=self.accelerator.device
+        )
         new_frame = torch.clamp(
             new_frame, -self.config.noise_abs_max, self.config.noise_abs_max
         )
-        
+
         x_noisy[:, -1:] = new_frame
 
         start_frame = max(0, num_frames - self.dit.max_frames)
@@ -697,9 +700,13 @@ class DiffusionTrainer:
                 logging.info(
                     f"[GPU {rank}/{world_size}] Actions values - Min: {actions.min():.3f}, Max: {actions.max():.3f}, Mean: {actions.mean():.3f}"
                 )
+
             self._first_step_done = True
 
         self.optimizer.zero_grad()
+        if actions is not None and torch.rand(1) < 0.1:
+            actions = None
+
         return self._shared_step(
             frames, actions, global_step, visualize=visualize, is_training=True
         )
@@ -709,7 +716,7 @@ class DiffusionTrainer:
         """Run validation loop"""
         self.dit.eval()
         val_losses = []
-        total_dataset_size = split_len("validation")
+        total_dataset_size = len(val_loader.dataset)
         total_steps = total_dataset_size // (
             self.config.validation_batch_size * self.accelerator.num_processes
         )
@@ -718,6 +725,8 @@ class DiffusionTrainer:
             total=total_steps,
             desc="Validation",
             disable=not self.accelerator.is_local_main_process,
+            position=1,  # Add position parameter
+            leave=True,  # Add leave parameter
         ) as pbar:
             for batch in val_loader:
                 frames = batch["video"]
@@ -737,7 +746,7 @@ class DiffusionTrainer:
         self.dit.train()
         return val_losses
 
-    def save_checkpoint(self, epoch, global_step):
+    def save_model(self, epoch, global_step):
         """Save model checkpoint"""
         if self.accelerator.is_main_process:
             logging.info(
@@ -746,21 +755,109 @@ class DiffusionTrainer:
             os.makedirs(self.config.output_dir, exist_ok=True)
             checkpoint_path = os.path.join(
                 self.config.output_dir,
-                f"{self.config.model_name}_epoch_{epoch+1}_{global_step}.pt",
+                f"{self.config.model_name}_epoch_{epoch+1}_{global_step}.safetensors",
             )
 
             self.accelerator.save(
-                self.accelerator.unwrap_model(self.dit).state_dict(), checkpoint_path
+                self.accelerator.unwrap_model(self.dit).state_dict(),
+                checkpoint_path,
+                safe_serialization=True,
             )
             self.logger.warning(f"Saved checkpoint to {checkpoint_path}")
+
+    def save_checkpoint(self, epoch, global_step):
+        """Save full training state checkpoint"""
+
+        self.accelerator.wait_for_everyone()
+
+        if self.accelerator.is_main_process:
+            logging.info(f"Saving checkpoint at epoch {epoch+1} and step {global_step}")
+
+            # Save the state
+            self.accelerator.save_state(
+                os.path.join(
+                    self.config.output_dir,
+                    f"train_checkpoints/{self.config.model_name}_last",
+                )
+            )
+
+            with open(
+                os.path.join(
+                    self.config.output_dir,
+                    f"train_checkpoints/{self.config.model_name}_last",
+                    "step.json",
+                ),
+                "w",
+            ) as f:
+                json.dump({"step": global_step, "epoch": self.start_epoch}, f)
+
+            self.logger.warning(f"Saved checkpoint for step {global_step}")
+
+        # Wait for saving to complete before continuing
+        self.accelerator.wait_for_everyone()
+
+    def load_checkpoint(self, checkpoint_path, train_loader):
+        """Load training state from checkpoint including dataset state"""
+
+        self.logger.info(f"Loading checkpoint from {checkpoint_path}")
+
+        # Load the state
+        self.accelerator.load_state(checkpoint_path)
+
+        with open(os.path.join(checkpoint_path, "step.json"), "r") as f:
+            state = json.load(f)
+
+        self.global_step = state["step"]
+        self.start_epoch = state["epoch"]
+
+        # Skip batches to resume from the correct point in the epoch
+        print(f"Global step: {self.global_step}")
+        print(f"Current epoch: {self.start_epoch+1}")
+
+        steps_in_epoch = self.global_step % (
+            len(train_loader) // self.config.gradient_accumulation_steps
+        )
+        batches_to_skip = steps_in_epoch * self.config.gradient_accumulation_steps
+        if batches_to_skip > 0:
+            train_loader = self.accelerator.skip_first_batches(
+                train_loader, batches_to_skip
+            )
+
+        # Wait for all processes to complete loading
+        self.accelerator.wait_for_everyone()
+
+        if self.accelerator.is_main_process:
+            self.logger.info(
+                f"Resumed from epoch {self.start_epoch+1}, step {self.global_step}"
+            )
+
+        return train_loader
 
     def train(self, train_loader, val_loader):
         """Training loop"""
         # Prepare dataloader with accelerator
         train_loader, val_loader = self.accelerator.prepare(train_loader, val_loader)
 
+        if self.config.resume_from_checkpoint:
+            checkpoint_path = os.path.join(
+                self.config.output_dir,
+                f"train_checkpoints/{self.config.model_name}_last",
+            )
+
+            print(
+                f"Resume from checkpoint enabled, we will attempt to restore checkpoint from {checkpoint_path}"
+            )
+
+            if os.path.exists(checkpoint_path):
+                train_loader = self.load_checkpoint(checkpoint_path, train_loader)
+                print("Checkpoint restored successfully")
+            else:
+                print(
+                    f"Checkpoint {checkpoint_path} not found, we will start from scratch"
+                )
+
         self.dit.train()
-        total_dataset_size = split_len("train")
+        total_dataset_size = len(train_loader.dataset)
         steps_per_epoch = total_dataset_size // (
             self.config.batch_size
             * self.accelerator.num_processes
@@ -771,42 +868,42 @@ class DiffusionTrainer:
             total_training_steps = min(total_training_steps, self.config.max_steps)
 
         with tqdm(
+            initial=self.global_step,
             total=total_training_steps,
             disable=not self.accelerator.is_local_main_process,
+            position=0,  # Add position parameter
+            leave=True,  # Add leave parameter
         ) as progress_bar:
-            global_step = 0
-
             # Evaluate model before training
-            
-            
-            val_losses = self.validation(val_loader, global_step)
-            avg_val_loss = sum(d["loss"] for d in val_losses) / len(val_losses)
+            if self.global_step == 0:
+                val_losses = self.validation(val_loader, self.global_step)
+                avg_val_loss = sum(d["loss"] for d in val_losses) / len(val_losses)
 
-            if self.accelerator.is_main_process and self.config.use_wandb:
-                wandb.log(
-                    {
-                        "val_loss": avg_val_loss,
-                        "epoch": 0,
-                        "step": global_step,
-                    }
+                if self.accelerator.is_main_process and self.config.use_wandb:
+                    wandb.log(
+                        {
+                            "val_loss": avg_val_loss,
+                            "epoch": 0,
+                            "step": self.global_step,
+                        }
+                    )
+
+                self.predict(
+                    val_loader,
+                    epoch=0,
+                    global_step=self.global_step,
                 )
+                self.predict_noise(val_loader, epoch=0, global_step=self.global_step)
 
-            self.predict(
-                val_loader,
-                epoch=0,
-                global_step=global_step,
-            )
-            self.predict_noise(val_loader, epoch=0, global_step=global_step)
-            
-            for epoch in range(self.config.num_epochs):
+            for epoch in range(self.start_epoch, self.config.num_epochs):
                 accumulated_loss = 0.0  # Add accumulator
                 for step, batch in enumerate(train_loader):
                     if (
                         self.config.max_steps > 0
-                        and global_step >= self.config.max_steps
+                        and self.global_step >= self.config.max_steps
                     ):
                         print(
-                            f"Reached max steps: {self.config.max_steps}. Current step: {global_step}"
+                            f"Reached max steps: {self.config.max_steps}. Current step: {self.global_step}"
                         )
                         return
                     frames = batch["video"]
@@ -818,15 +915,15 @@ class DiffusionTrainer:
                     visualize = (
                         not hasattr(self, "_first_step_done")  # First step
                         or (
-                            global_step > 0  # Past first step
-                            and global_step % self.config.validation_steps
+                            self.global_step > 0  # Past first step
+                            and self.global_step % self.config.validation_steps
                             == 0  # Validation time
                             and (step + 1) % self.config.gradient_accumulation_steps
                             == 0  # Grad accumulation complete
                         )
                     )
                     loss = self.training_step(
-                        frames, actions, global_step, visualize=visualize
+                        frames, actions, self.global_step, visualize=visualize
                     )
                     accumulated_loss += loss  # Accumulate loss
 
@@ -845,27 +942,36 @@ class DiffusionTrainer:
                         self.scheduler.step()
                         self.optimizer.zero_grad()
                         progress_bar.update(1)
-                        global_step += 1
+                        self.global_step += 1
 
+                        # Log training metrics
                         if self.accelerator.is_main_process:
-                            if (
-                                self.config.use_wandb
-                                and global_step % self.config.logging_steps == 0
-                            ):
+                            if self.global_step % self.config.logging_steps == 0:
                                 current_lr = self.scheduler.get_last_lr()[0]
-                                wandb.log(
+
+                                progress_bar.set_postfix(
                                     {
-                                        "train_loss": avg_loss,  # Use averaged loss
-                                        "learning_rate": current_lr,
-                                        "epoch": epoch,
-                                        "step": global_step,
+                                        "epoch": f"{epoch+1}/{self.config.num_epochs}",
+                                        "loss": f"{avg_loss:.4f}",
+                                        "lr": f"{current_lr:.6f}",
                                     }
                                 )
+                                if self.config.use_wandb:
+                                    wandb.log(
+                                        {
+                                            "train_loss": avg_loss,  # Use averaged loss
+                                            "learning_rate": current_lr,
+                                            "epoch": epoch,
+                                            "step": self.global_step,
+                                        }
+                                    )
+
+                        # Evaluate model
                         if (
-                            global_step > 0
-                            and global_step % self.config.validation_steps == 0
+                            self.global_step > 0
+                            and self.global_step % self.config.validation_steps == 0
                         ):
-                            val_losses = self.validation(val_loader, global_step)
+                            val_losses = self.validation(val_loader, self.global_step)
                             avg_val_loss = sum(d["loss"] for d in val_losses) / len(
                                 val_losses
                             )
@@ -878,25 +984,28 @@ class DiffusionTrainer:
                                     {
                                         "val_loss": avg_val_loss,
                                         "epoch": epoch,
-                                        "step": global_step,
+                                        "step": self.global_step,
                                     }
                                 )
 
                             self.predict(
                                 val_loader,
                                 epoch=0,
-                                global_step=global_step,
+                                global_step=self.global_step,
                             )
                             self.predict_noise(
-                                val_loader, epoch=0, global_step=global_step
+                                val_loader, epoch=0, global_step=self.global_step
                             )
 
                         # Save checkpoint
                         if (
-                            global_step > 0
-                            and global_step % self.config.save_every == 0
+                            self.global_step > 0
+                            and self.global_step % self.config.save_every == 0
                         ):
-                            self.save_checkpoint(epoch, global_step)
+                            self.save_model(epoch, self.global_step)
+                            self.save_checkpoint(epoch, self.global_step)
+
+                self.start_epoch += 1
 
 
 def main():
@@ -907,7 +1016,7 @@ def main():
     args = parser.parse_args()
 
     config = TrainingConfig.from_yaml(args.config)
-    trainer = DiffusionTrainer(config)
+
     # Setup data loading
 
     if config.dataset_type == "webdataset":
@@ -946,6 +1055,8 @@ def main():
         persistent_workers=True,
         pin_memory=True,
     )
+
+    trainer = DiffusionTrainer(config, total_dataset_size=len(train_loader.dataset))
 
     # Start training
     trainer.train(train_loader, val_loader)

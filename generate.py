@@ -8,6 +8,7 @@ import argparse
 import torch
 from accelerate import Accelerator
 from einops import rearrange
+from safetensors.torch import load_model
 from torch import autocast
 from torch.utils.data import DataLoader
 from torchvision.io import write_video
@@ -15,25 +16,19 @@ from tqdm import tqdm
 
 from model.dit import DiT_models
 from model.vae import VAE_models
-from utils import sigmoid_beta_schedule
-from web_dataset import ImageDataset
-from generate_og import load_prompt
 from train_dit import denoise_step
+from utils import sigmoid_beta_schedule, visualize_step
+from web_dataset import ImageDataset
 
 torch.manual_seed(0)
 torch.cuda.manual_seed(0)
-from utils import visualize_step
 
 
 @torch.inference_mode
 def load_models(accelerator: Accelerator, dit_model_path: str, vae_model_path: str):
     # Load DiT model
-    dit_ckpt = torch.load(dit_model_path, weights_only=True)
-    dit_ckpt = {
-        k.replace("_orig_mod.", ""): v for k, v in dit_ckpt.items()
-    }  # Remove torch.compile prefix
     dit_model = DiT_models["DiT-S/2"]()
-    missing_keys, unexpected_keys = dit_model.load_state_dict(dit_ckpt, strict=False)
+    missing_keys, unexpected_keys = load_model(dit_model, dit_model_path)
     if missing_keys or unexpected_keys:
         print(
             f"Error loading DiT model. Missing or unexpected keys. Please check the model.\n"
@@ -42,10 +37,8 @@ def load_models(accelerator: Accelerator, dit_model_path: str, vae_model_path: s
         )
 
     # Load VAE model
-    vae_ckpt = torch.load(vae_model_path, weights_only=True)
     vae_model = VAE_models["vit-l-20-shallow-encoder"]()
-    vae_model.load_state_dict(vae_ckpt)
-
+    load_model(vae_model, vae_model_path)
     dit_model, vae_model = accelerator.prepare(dit_model, vae_model)
     # dit_model = torch.compile(dit_model)
     # vae_model = torch.compile(vae_model)
@@ -103,6 +96,12 @@ def main():
         help="Number of noise steps (default: 100)",
     )
 
+    parser.add_argument(
+        "--use_actions",
+        action="store_true",
+        help="Use actions (default: False). We will use W for all the frames.",
+    )
+
     args = parser.parse_args()
 
     assert torch.cuda.is_available()
@@ -124,11 +123,27 @@ def main():
     stabilization_level = 15
 
     # Load input video
-    test_dataset = ImageDataset(split="test", return_actions=False)
+    test_dataset = ImageDataset(split="test", return_actions=args.use_actions)
     test_loader = DataLoader(test_dataset, batch_size=1, num_workers=0)
     test_loader = accelerator.prepare(test_loader)
-    video = next(iter(test_loader))["video"]
-    video = load_prompt("sample_data/gtaV1.jpg").to(accelerator.device)
+    batch = next(iter(test_loader))
+    video = batch["video"]
+    actions = None if not args.use_actions else batch["actions"]
+
+    if actions is not None:
+        new_actions = torch.zeros(
+            (
+                actions.shape[0],
+                total_frames - actions.shape[1],
+                actions.shape[2],
+            ),
+            device=actions.device,
+        )
+        new_actions[:, :, 3] = 1  # Set W for all the new frames (drive straight)
+        actions = torch.cat([actions, new_actions], dim=1)
+    else:
+        actions = None
+
     # Prepare input frames
     x = video[:, :n_prompt_frames]
     x = accelerator.prepare(x)
@@ -137,8 +152,6 @@ def main():
     max_noise_level = 1000
     ddim_noise_steps = args.noise_steps
     noise_range = torch.linspace(0, max_noise_level - 1, ddim_noise_steps + 1)
-    noise_abs_max = 20
-    stabilization_level = 15
     betas = sigmoid_beta_schedule(max_noise_level).float().to(accelerator.device)
     alphas = 1.0 - betas
     alphas_cumprod = torch.cumprod(alphas, dim=0)
@@ -149,7 +162,7 @@ def main():
         chunk = torch.clamp(chunk, -noise_abs_max, +noise_abs_max)
         x = torch.cat([x, chunk], dim=1)
         start_frame = max(0, i + 1 - model.max_frames)
-
+        x_old = x.clone()
         for noise_idx in reversed(range(0, ddim_noise_steps + 1)):
             x_pred, v_pred = denoise_step(
                 dit_model=model,
@@ -160,8 +173,9 @@ def main():
                 alphas_cumprod=alphas_cumprod,
                 start_frame=start_frame,
                 dtype=dtype,
+                actions=actions,
             )
-            x_old = x.clone()
+
             # Update only the last frame
             x[:, -1:] = x_pred[:, -1:]
             if noise_idx == 0:
@@ -173,7 +187,7 @@ def main():
                     step=noise_idx,
                     vae=vae,
                     alphas_cumprod=alphas_cumprod,
-                    pred=x_pred,
+                    pred=x[:, start_frame:],
                     scaling_factor=0.07843137255,
                     name=f"frame_{i}",
                 )
