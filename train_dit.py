@@ -27,13 +27,6 @@ from utils import sigmoid_beta_schedule, visualize_step
 from web_dataset import ImageDataset as WebDataset
 
 
-def checkerboard_loss(x):
-    # Detect 2x2 checkerboard patterns
-    checker_h = x[:, :, ::2, :] + x[:, :, 1::2, :]
-    checker_w = x[:, :, :, ::2] + x[:, :, :, 1::2]
-    return (checker_h**2).mean() + (checker_w**2).mean()
-
-
 @torch.inference_mode()
 def denoise_step(
     dit_model,
@@ -65,20 +58,20 @@ def denoise_step(
             - v_pred: The predicted noise
     """
 
-    # Create time tensors for context and target frames
     batch_size = x_noisy.shape[0]
+
+    # Use a fixed low noise level for context frames
     t_ctx = torch.full(
         (batch_size, x_noisy.shape[1] - 1),
-        stabilization_level - 1,
+        stabilization_level,  # Use stabilization_level directly instead of stabilization_level - 1
         dtype=torch.long,
         device=x_noisy.device,
     )
 
-    curr_noise = max(0, noise_range[noise_idx])  # Ensure non-negative
-    next_noise = max(
-        0, noise_range[max(0, noise_idx - 1)]
-    )  # Ensure valid index and non-negative
-
+    # Only apply progressive denoising to the last frame
+    curr_noise = noise_range[noise_idx]
+    next_noise = noise_range[max(0, noise_idx - 1)]
+    # print(f"curr_noise: {curr_noise}, next_noise: {next_noise}")
     t = torch.full(
         (batch_size, 1),
         curr_noise,
@@ -92,7 +85,6 @@ def denoise_step(
         dtype=torch.long,
         device=x_noisy.device,
     )
-    t_next = torch.where(t_next < 0, t, t_next)
 
     # Concatenate time tensors
     t = torch.cat([t_ctx, t], dim=1)
@@ -525,8 +517,8 @@ class DiffusionTrainer:
 
         start_frame = max(0, num_frames - self.dit.max_frames)
         # Progressive denoising of the last frame only
+        x_noisy_old = x_noisy.clone()
         for noise_idx in reversed(range(0, self.config.ddim_noise_steps_inference + 1)):
-            x_noisy_old = x_noisy.clone()
             x_pred, v_pred = denoise_step(
                 dit_model=self.dit,
                 x_noisy=x_noisy,
@@ -541,21 +533,22 @@ class DiffusionTrainer:
             # Update only the last frame
             x_noisy[:, -1:] = x_pred[:, -1:]
             # Visualize intermediate steps
-            visualize_step(
-                x_curr=latents[:1],
-                x_noisy=x_noisy_old[:1],
-                noise=torch.cat([ctx_noise, new_frame], dim=1)[
-                    :1
-                ],  # Make sure noise is properly shaped
-                v=v_pred[:1],
-                pred=x_pred[:1],  # Keep context frames unchanged
-                step=global_step,
-                scaling_factor=0.07843137255,
-                name=f"{self.config.model_name}_noise_gs_{global_step}_pred_step_{noise_idx}.png",
-                vae=self.vae,
-                alphas_cumprod=self.alphas_cumprod,
-                dtype=self.dtype,
-            )
+            if noise_idx == 0:
+                visualize_step(
+                    x_curr=latents[:1],
+                    x_noisy=x_noisy_old[:1],
+                    noise=torch.cat([ctx_noise, new_frame], dim=1)[
+                        :1
+                    ],  # Make sure noise is properly shaped
+                    v=v_pred[:1],
+                    pred=x_pred[:1],  # Keep context frames unchanged
+                    step=global_step,
+                    scaling_factor=0.07843137255,
+                    name=f"{self.config.model_name}_noise_gs_{global_step}_pred_step_{noise_idx}.png",
+                    vae=self.vae,
+                    alphas_cumprod=self.alphas_cumprod,
+                    dtype=self.dtype,
+                )
 
         self.dit.train()
 
@@ -574,79 +567,84 @@ class DiffusionTrainer:
         total_frames = frames.shape[1]
 
         # Encode frames to latent space - do this once for all frames
+        with torch.no_grad():
+            latents = self.encode_frames(frames)
+            total_loss = 0.0
 
-        latents = self.encode_frames(frames)
-        total_loss = 0.0
-
-        # Pre-compute noise indices for all frames at once
-        target_noise_indices = torch.randint(
-            1,
-            self.config.ddim_noise_steps + 1,
-            (total_frames - self.config.n_prompt_frames, batch_size),
-            device=self.accelerator.device,
-        )
-
-        ctx_noise_indices = torch.randint(
-            1,
-            self.config.ctx_max_noise_idx + 1,
-            (total_frames - self.config.n_prompt_frames, batch_size),
-            device=self.accelerator.device,
-        )
-        ctx_noise_indices = torch.minimum(ctx_noise_indices, target_noise_indices)
-
-        # Process frames sequentially after context frames
-        for idx, i in enumerate(range(self.config.n_prompt_frames, total_frames)):
-            x_input = latents[:, : i + 1]
-            if actions is not None:
-                actions_input = actions[:, : i + 1]
-            else:
-                actions_input = None
-
-            start_frame = max(0, i + 1 - self.max_frames)
-
-            target_noise_idx = target_noise_indices[idx]
-            ctx_noise_idx = ctx_noise_indices[idx]
-
-            # Create time steps tensor efficiently
-            t = torch.zeros(
-                (batch_size, i + 1),
-                dtype=torch.long,
+            # Pre-compute noise indices for all frames at once
+            target_noise_indices = torch.randint(
+                1,
+                self.config.ddim_noise_steps + 1,
+                (total_frames - self.config.n_prompt_frames, batch_size),
                 device=self.accelerator.device,
             )
 
-            # Set noise levels more efficiently
-            t[:, :-1] = self.noise_range[ctx_noise_idx].unsqueeze(1)
-            t[:, -1] = self.noise_range[target_noise_idx]
+            ctx_noise_indices = torch.randint(
+                1,
+                self.config.ctx_max_noise_idx + 1,
+                (total_frames - self.config.n_prompt_frames, batch_size),
+                device=self.accelerator.device,
+            )
+            ctx_noise_indices = torch.minimum(ctx_noise_indices, target_noise_indices)
 
-            # Apply sliding window
-            x_curr = x_input[:, start_frame:]
-            t = t[:, start_frame:]
-            if actions_input is not None:
-                actions_curr = actions_input[:, start_frame:]
-            else:
-                actions_curr = None
+        # Process frames sequentially after context frames
+        for idx, i in enumerate(range(self.config.n_prompt_frames, total_frames)):
+            with torch.no_grad():
+                x_input = latents[:, : i + 1]
+                if actions is not None:
+                    actions_input = actions[:, : i + 1]
+                else:
+                    actions_input = None
+
+                start_frame = max(0, i + 1 - self.max_frames)
+
+                target_noise_idx = target_noise_indices[idx]
+                ctx_noise_idx = ctx_noise_indices[idx]
+
+                # Create time steps tensor efficiently
+                t = torch.zeros(
+                    (batch_size, i + 1),
+                    dtype=torch.long,
+                    device=self.accelerator.device,
+                )
+
+                t[:, :-1] = self.noise_range[ctx_noise_idx].unsqueeze(1)
+                t[:, -1] = self.noise_range[target_noise_idx]
+
+                # Apply sliding window
+                x_curr = x_input[:, start_frame:]
+                t = t[:, start_frame:]
+                if actions_input is not None:
+                    actions_curr = actions_input[:, start_frame:]
+                else:
+                    actions_curr = None
 
             # Generate and add noise more efficiently
             with self.accelerator.autocast():
                 # Add noise to context frames
-                ctx_noise = torch.randn_like(x_curr[:, :-1])
-                ctx_noise.clamp_(-self.config.noise_abs_max, self.config.noise_abs_max)
+                with torch.no_grad():
+                    ctx_noise = torch.randn_like(x_curr[:, :-1])
+                    ctx_noise.clamp_(
+                        -self.config.noise_abs_max, self.config.noise_abs_max
+                    )
 
-                x_noisy = x_curr.clone()
-                alpha_t = self.alphas_cumprod[t[:, :-1]]
-                x_noisy[:, :-1].mul_(alpha_t.sqrt()).add_(
-                    (1 - alpha_t).sqrt() * ctx_noise
-                )
+                    x_noisy = x_curr.clone()
+                    alpha_t = self.alphas_cumprod[t[:, :-1]]
+                    x_noisy[:, :-1].mul_(alpha_t.sqrt()).add_(
+                        (1 - alpha_t).sqrt() * ctx_noise
+                    )
 
-                # Add noise to current frame
-                noise = torch.randn_like(x_curr[:, -1:])
-                noise.clamp_(-self.config.noise_abs_max, self.config.noise_abs_max)
-                alpha_t = self.alphas_cumprod[t[:, -1:]]
+                    # Add noise to current frame
+                    noise = torch.randn_like(x_curr[:, -1:])
+                    noise.clamp_(-self.config.noise_abs_max, self.config.noise_abs_max)
+                    alpha_t = self.alphas_cumprod[t[:, -1:]]
 
-                x_noisy[:, -1:].mul_(alpha_t.sqrt()).add_((1 - alpha_t).sqrt() * noise)
-                v_target = (
-                    alpha_t.sqrt() * noise - (1 - alpha_t).sqrt() * x_curr[:, -1:]
-                )
+                    x_noisy[:, -1:].mul_(alpha_t.sqrt()).add_(
+                        (1 - alpha_t).sqrt() * noise
+                    )
+                    v_target = (
+                        alpha_t.sqrt() * noise - (1 - alpha_t).sqrt() * x_curr[:, -1:]
+                    )
 
                 # Model prediction
                 v_pred = self.dit(x_noisy, t, actions_curr)
@@ -704,8 +702,8 @@ class DiffusionTrainer:
             self._first_step_done = True
 
         self.optimizer.zero_grad()
-        if actions is not None and torch.rand(1) < 0.1:
-            actions = None
+        # if actions is not None and torch.rand(1) < 0.1:
+        #    actions = None
 
         return self._shared_step(
             frames, actions, global_step, visualize=visualize, is_training=True
@@ -789,7 +787,7 @@ class DiffusionTrainer:
                 ),
                 "w",
             ) as f:
-                json.dump({"step": global_step, "epoch": self.start_epoch}, f)
+                json.dump({"step": global_step, "epoch": epoch}, f)
 
             self.logger.warning(f"Saved checkpoint for step {global_step}")
 
@@ -814,10 +812,11 @@ class DiffusionTrainer:
         print(f"Global step: {self.global_step}")
         print(f"Current epoch: {self.start_epoch+1}")
 
-        steps_in_epoch = self.global_step % (
-            len(train_loader) // self.config.gradient_accumulation_steps
-        )
+        # Calculate steps within the current epoch
+        steps_in_epoch = self.global_step % len(train_loader)
+        # Multiply by gradient_accumulation_steps to get the actual batch position
         batches_to_skip = steps_in_epoch * self.config.gradient_accumulation_steps
+
         if batches_to_skip > 0:
             train_loader = self.accelerator.skip_first_batches(
                 train_loader, batches_to_skip
@@ -828,7 +827,7 @@ class DiffusionTrainer:
 
         if self.accelerator.is_main_process:
             self.logger.info(
-                f"Resumed from epoch {self.start_epoch+1}, step {self.global_step}"
+                f"Resumed from epoch {self.start_epoch+1}, step {self.global_step}, skipping {batches_to_skip} batches"
             )
 
         return train_loader

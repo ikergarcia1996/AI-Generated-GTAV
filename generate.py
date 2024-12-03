@@ -17,7 +17,7 @@ from tqdm import tqdm
 from model.dit import DiT_models
 from model.vae import VAE_models
 from train_dit import denoise_step
-from utils import sigmoid_beta_schedule, visualize_step
+from utils import sigmoid_beta_schedule
 from web_dataset import ImageDataset
 
 torch.manual_seed(0)
@@ -85,7 +85,7 @@ def main():
     parser.add_argument(
         "--vae_model_path",
         type=str,
-        default="checkpoints/vit-l-20.pt",
+        default="checkpoints/vit-l-20.safetensors",
         help="Path to VAE model checkpoint (default: checkpoints/vit-l-20-shallow-encoder.pt)",
     )
 
@@ -178,6 +178,7 @@ def main():
 
             # Update only the last frame
             x[:, -1:] = x_pred[:, -1:]
+            """"
             if noise_idx == 0:
                 visualize_step(
                     x_curr=x_old[:, start_frame:],
@@ -191,6 +192,7 @@ def main():
                     scaling_factor=0.07843137255,
                     name=f"frame_{i}",
                 )
+            """
 
     # Decode and save video
     x = rearrange(x, "b t c h w -> (b t) (h w) c")

@@ -1,5 +1,5 @@
 vae_checkpoint: checkpoints/vit-l-20.safetensors
-pretrained_model: #checkpoints/oasis500m.safetensors
+pretrained_model: checkpoints/oasis500m.safetensors
 model_name: dit
 learning_rate: 1e-4
 min_learning_rate: 1e-4
@@ -14,20 +14,20 @@ weight_decay: 0.0
 
 num_epochs: 10000
 max_steps: 100000
-validation_steps: 20
-save_every: 20
+validation_steps: 500
+save_every: 500
 output_dir: checkpoints
 logging_steps: 5
 
 seed: 42
 use_wandb: false
 
-ddim_noise_steps:  8
-ddim_noise_steps_inference: 8
-ctx_max_noise_idx:  4 
+ddim_noise_steps:  50
+ddim_noise_steps_inference: 100
+ctx_max_noise_idx:  24 
 noise_abs_max: 20.0
 n_prompt_frames: 4
 
-resume_from_checkpoint: True
+resume_from_checkpoint: false
 
 use_action_conditioning: true
