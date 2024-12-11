@@ -12,7 +12,7 @@ dataset_type: hfdataset
 weight_decay: 0.0
 
 
-num_epochs: 10
+num_epochs: 20
 max_steps: -1  
 validation_steps: 10000
 save_every: 10000

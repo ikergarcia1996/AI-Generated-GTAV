@@ -197,10 +197,6 @@ class DiffusionTrainer:
                 "Please use bf16 (recommended) or fp16. "
                 "accelerate launch --mixed_precision bf16 train_dit.py"
             )
-
-        if config.use_wandb and self.accelerator.is_main_process:
-            wandb.init(project="diffusion-transformer", config=vars(config))
-
         # Set seed for reproducibility
         set_seed(config.seed)
 
@@ -269,6 +265,9 @@ class DiffusionTrainer:
         )
 
         self.accelerator.register_for_checkpointing(self.scheduler)
+
+        self.wandb_run_id = None
+        self.skip_iter = 0
 
         # Compile models for faster training (PyTorch 2.0+)
         """
@@ -370,7 +369,7 @@ class DiffusionTrainer:
         return pixels
 
     @torch.inference_mode()
-    def predict(self, test_loader, epoch, global_step, num_frames=16):
+    def predict(self, test_loader, epoch, global_step, num_frames=32):
         """Generate a video from a prompt frame and optional actions"""
         self.dit.eval()
 
@@ -787,7 +786,13 @@ class DiffusionTrainer:
                 ),
                 "w",
             ) as f:
-                json.dump({"step": global_step, "epoch": epoch}, f)
+                save_state = {
+                    "step": global_step,
+                    "epoch": epoch,
+                }
+                if wandb.run is not None:
+                    save_state["wandb_run_id"] = wandb.run.id
+                json.dump(save_state, f)
 
             self.logger.warning(f"Saved checkpoint for step {global_step}")
 
@@ -805,6 +810,22 @@ class DiffusionTrainer:
         with open(os.path.join(checkpoint_path, "step.json"), "r") as f:
             state = json.load(f)
 
+        if "wandb_run_id" in state:  # Add this check
+            print(f"WANDB RUN ID: {state['wandb_run_id']}")
+            self.wandb_run_id = state["wandb_run_id"]
+
+            if self.config.use_wandb and self.accelerator.is_main_process:
+                wandb.init(
+                    project="diffusion-transformer",
+                    id=self.wandb_run_id,  # Use the saved run_id if available
+                    resume="allow",  # Allow resuming the run
+                    config=vars(self.config),
+                )
+        else:
+            print(
+                "No wandb run id found. Legacy checkpoint? We will initialize a new run."
+            )
+
         self.global_step = state["step"]
         self.start_epoch = state["epoch"]
 
@@ -815,19 +836,14 @@ class DiffusionTrainer:
         # Calculate steps within the current epoch
         steps_in_epoch = self.global_step % len(train_loader)
         # Multiply by gradient_accumulation_steps to get the actual batch position
-        batches_to_skip = steps_in_epoch * self.config.gradient_accumulation_steps
-
-        if batches_to_skip > 0:
-            train_loader = self.accelerator.skip_first_batches(
-                train_loader, batches_to_skip
-            )
+        self.skip_iter = steps_in_epoch * self.config.gradient_accumulation_steps
 
         # Wait for all processes to complete loading
         self.accelerator.wait_for_everyone()
 
         if self.accelerator.is_main_process:
             self.logger.info(
-                f"Resumed from epoch {self.start_epoch+1}, step {self.global_step}, skipping {batches_to_skip} batches"
+                f"Resumed from epoch {self.start_epoch+1}, step {self.global_step}, skipping {self.skip_iter} batches"
             )
 
         return train_loader
@@ -854,6 +870,13 @@ class DiffusionTrainer:
                 print(
                     f"Checkpoint {checkpoint_path} not found, we will start from scratch"
                 )
+
+        if (
+            self.config.use_wandb
+            and self.accelerator.is_main_process
+            and self.wandb_run_id is None
+        ):
+            wandb.init(project="diffusion-transformer", config=vars(self.config))
 
         self.dit.train()
         total_dataset_size = len(train_loader.dataset)
@@ -905,6 +928,11 @@ class DiffusionTrainer:
                             f"Reached max steps: {self.config.max_steps}. Current step: {self.global_step}"
                         )
                         return
+
+                    if self.skip_iter > 0:
+                        self.skip_iter -= 1
+                        continue
+
                     frames = batch["video"]
                     if self.config.use_action_conditioning:
                         actions = batch["actions"]
@@ -1020,7 +1048,8 @@ def main():
 
     if config.dataset_type == "webdataset":
         logging.info(
-            "Using WebDataset. This will stream the dataset from the webdataset directory. Is memory efficient, but may be slow."
+            "Using WebDataset. This will stream the dataset from the webdataset directory. Is memory efficient, but may be slow.\n"
+            "Web dataset will not restore the dataset state if you resume from a checkpoint."
         )
         ImageDataset = WebDataset
     elif config.dataset_type == "hfdataset":

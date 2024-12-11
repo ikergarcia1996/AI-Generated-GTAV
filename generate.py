@@ -102,6 +102,13 @@ def main():
         help="Use actions (default: False). We will use W for all the frames.",
     )
 
+    parser.add_argument(
+        "--output_path",
+        type=str,
+        default="video1.mp4",
+        help="Path to save the generated video (default: video1.mp4)",
+    )
+
     args = parser.parse_args()
 
     assert torch.cuda.is_available()
@@ -117,10 +124,19 @@ def main():
     # Sampling parameters
     B = 1  # Batch size
     total_frames = args.total_frames
-    n_prompt_frames = 1
+    n_prompt_frames = 4
     ddim_noise_steps = args.noise_steps
     noise_abs_max = 20
     stabilization_level = 15
+    model.max_frames = 5
+    print(
+        f"We will generate {total_frames} frames, starting with {n_prompt_frames} frames."
+    )
+    print(f"Model max frames: {model.max_frames}")
+    print(f"Noise steps: {ddim_noise_steps}")
+    print(f"Stabilization level: {stabilization_level}")
+    print(f"Noise absolute max: {noise_abs_max}")
+    print(f"Actions is set to {args.use_actions}.")
 
     # Load input video
     test_dataset = ImageDataset(split="test", return_actions=args.use_actions)
@@ -203,9 +219,12 @@ def main():
 
     x = torch.clamp(x * 255, 0, 255).byte()
     # print(x)
-    write_video("video1.mp4", x[0].cpu(), fps=20)
-    print("generation saved to video1.mp4.")
+    write_video(args.output_path, x[0].cpu(), fps=10)
+    print(f"generation saved to {args.output_path}.")
 
 
 if __name__ == "__main__":
     main()
+
+
+# accelerate launch --mixed_precision bf16 generate.py --total-frames 128 --dit_model_path checkpoints/dit_continue_epoch_9_660000.safetensors --noise_steps 100 --output_path video_100_4.mp4

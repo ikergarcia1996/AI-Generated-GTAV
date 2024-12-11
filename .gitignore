@@ -141,3 +141,6 @@ wandb/
 videos/
 
 debug_*/
+
+
+*.mp4

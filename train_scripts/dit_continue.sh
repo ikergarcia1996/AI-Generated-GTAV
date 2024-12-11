@@ -2,11 +2,11 @@
 #SBATCH --partition=preemption
 #SBATCH --qos=xlong
 #SBATCH --job-name=DIT_continue
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=40
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:8
 #SBATCH --constraint=a100
-#SBATCH --mem=300G
+#SBATCH --mem=400G
 #SBATCH --output=.slurm/DIT_continue.out.txt
 #SBATCH --error=.slurm/DIT_continue.err.txt
 
@@ -23,4 +23,4 @@ export OMP_NUM_THREADS=32
 
 echo CUDA_VISIBLE_DEVICES "${CUDA_VISIBLE_DEVICES}"
 
-accelerate launch --mixed_precision bf16 train_dit.py configs/dit_config_continue.yaml
+accelerate launch --mixed_precision bf16 train_dit.py configs/dit_config_more.yaml
