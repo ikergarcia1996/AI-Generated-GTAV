@@ -20,8 +20,8 @@ from train_dit import denoise_step
 from utils import sigmoid_beta_schedule
 from web_dataset import ImageDataset
 
-torch.manual_seed(0)
-torch.cuda.manual_seed(0)
+#torch.manual_seed(0)
+#torch.cuda.manual_seed(0)
 
 
 @torch.inference_mode

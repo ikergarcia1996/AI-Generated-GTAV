@@ -1,18 +1,18 @@
 vae_checkpoint: checkpoints/vit-l-20.safetensors
 pretrained_model: checkpoints/dit_continue_more_epoch_12_920000.safetensors
-model_name: dit_continue_more
+model_name: dit_continue_finish
 learning_rate: 1e-4
-min_learning_rate: 1e-4
+min_learning_rate: 0
 warnup_ratio: 0.05
 batch_size: 16
 gradient_accumulation_steps: 1
 validation_batch_size: 16
 dataset_type: hfdataset
 
-weight_decay: 0.0
+weight_decay: 0.1
 
 
-num_epochs: 30
+num_epochs: 3
 max_steps: -1  
 validation_steps: 10000
 save_every: 10000

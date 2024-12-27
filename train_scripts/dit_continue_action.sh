@@ -2,11 +2,11 @@
 #SBATCH --partition=preemption
 #SBATCH --qos=xlong
 #SBATCH --job-name=DIT_continue_action
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=40
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
 #SBATCH --constraint=a100
-#SBATCH --mem=300G
+#SBATCH --mem=400G
 #SBATCH --output=.slurm/DIT_continue_action.out.txt
 #SBATCH --error=.slurm/DIT_continue_action.err.txt
 
