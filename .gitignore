@@ -138,9 +138,4 @@ wandb/
 .slurm/DIT_train.err.txt
 .slurm/DIT_train.out.txt
 
-videos/
-
 debug_*/
-
-
-*.mp4

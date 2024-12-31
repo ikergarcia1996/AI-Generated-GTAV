@@ -11,7 +11,8 @@ from einops import rearrange
 from safetensors.torch import load_model
 from torch import autocast
 from torch.utils.data import DataLoader
-from torchvision.io import write_video
+from torchvision import transforms
+from torchvision.io import read_image, write_video
 from tqdm import tqdm
 
 from model.dit import DiT_models
@@ -20,8 +21,8 @@ from train_dit import denoise_step
 from utils import sigmoid_beta_schedule
 from web_dataset import ImageDataset
 
-#torch.manual_seed(0)
-#torch.cuda.manual_seed(0)
+# torch.manual_seed(0)
+# torch.cuda.manual_seed(0)
 
 
 @torch.inference_mode
@@ -51,7 +52,7 @@ def vae_encode(x, vae, n_prompt_frames, scaling_factor=0.07843137255):
     x = rearrange(x, "b t c h w -> (b t) c h w")
     H, W = x.shape[-2:]
 
-    with torch.no_grad(), autocast("cuda", dtype=torch.bfloat16):
+    with autocast("cuda", dtype=torch.bfloat16):
         x = vae.encode(x * 2 - 1).mean * scaling_factor
 
     x = rearrange(
@@ -109,6 +110,13 @@ def main():
         help="Path to save the generated video (default: video1.mp4)",
     )
 
+    parser.add_argument(
+        "--start_frame",
+        type=str,
+        default=None,
+        help="Path to save the start frame (default: None)",
+    )
+
     args = parser.parse_args()
 
     assert torch.cuda.is_available()
@@ -117,14 +125,14 @@ def main():
         mixed_precision="bf16" if torch.cuda.is_bf16_supported() else "fp16"
     )
     dtype = torch.bfloat16 if accelerator.mixed_precision == "bf16" else torch.float16
-
+    print(f"Using {accelerator.mixed_precision} precision.")
     # Initialize models and parameters
     model, vae = load_models(accelerator, args.dit_model_path, args.vae_model_path)
 
     # Sampling parameters
     B = 1  # Batch size
     total_frames = args.total_frames
-    n_prompt_frames = 4
+    n_prompt_frames = 4 if args.start_frame is None else 1
     ddim_noise_steps = args.noise_steps
     noise_abs_max = 20
     stabilization_level = 15
@@ -139,83 +147,99 @@ def main():
     print(f"Actions is set to {args.use_actions}.")
 
     # Load input video
-    test_dataset = ImageDataset(split="test", return_actions=args.use_actions)
-    test_loader = DataLoader(test_dataset, batch_size=1, num_workers=0)
-    test_loader = accelerator.prepare(test_loader)
-    batch = next(iter(test_loader))
-    video = batch["video"]
-    actions = None if not args.use_actions else batch["actions"]
+    if args.start_frame is not None:
+        transform = transforms.Compose([transforms.Resize((360, 640))])
+        video = read_image(args.start_frame)
+        video = transform(video.float() / 255.0)
+        video = rearrange(video, "c h w -> 1 1 c h w")
+        if not not args.use_actions:
+            actions = None
+        else:
+            actions = torch.zeros((1, total_frames, 25), device=accelerator.device)
+            actions[:, :, 3] = 1  # Set W for all frames
 
-    if actions is not None:
-        new_actions = torch.zeros(
-            (
-                actions.shape[0],
-                total_frames - actions.shape[1],
-                actions.shape[2],
-            ),
-            device=actions.device,
-        )
-        new_actions[:, :, 3] = 1  # Set W for all the new frames (drive straight)
-        actions = torch.cat([actions, new_actions], dim=1)
+        video = video.to(dtype=dtype, device=accelerator.device)
+        actions = actions.to(device=accelerator.device)
+
     else:
-        actions = None
+        test_dataset = ImageDataset(split="test", return_actions=args.use_actions)
+        test_loader = DataLoader(test_dataset, batch_size=1, num_workers=0)
+        test_loader = accelerator.prepare(test_loader)
+        batch = next(iter(test_loader))
+        video = batch["video"]
+        actions = batch["actions"] if args.use_actions else None
 
-    # Prepare input frames
-    x = video[:, :n_prompt_frames]
-    x = accelerator.prepare(x)
-    x = vae_encode(x, vae, n_prompt_frames)
-
-    max_noise_level = 1000
-    ddim_noise_steps = args.noise_steps
-    noise_range = torch.linspace(0, max_noise_level - 1, ddim_noise_steps + 1)
-    betas = sigmoid_beta_schedule(max_noise_level).float().to(accelerator.device)
-    alphas = 1.0 - betas
-    alphas_cumprod = torch.cumprod(alphas, dim=0)
-    alphas_cumprod = rearrange(alphas_cumprod, "T -> T 1 1 1")
-
-    for i in tqdm(range(n_prompt_frames, total_frames)):
-        chunk = torch.randn((B, 1, *x.shape[-3:]), device=x.device)
-        chunk = torch.clamp(chunk, -noise_abs_max, +noise_abs_max)
-        x = torch.cat([x, chunk], dim=1)
-        start_frame = max(0, i + 1 - model.max_frames)
-        x_old = x.clone()
-        for noise_idx in reversed(range(0, ddim_noise_steps + 1)):
-            x_pred, v_pred = denoise_step(
-                dit_model=model,
-                x_noisy=x,
-                noise_idx=noise_idx,
-                stabilization_level=stabilization_level,
-                noise_range=noise_range,
-                alphas_cumprod=alphas_cumprod,
-                start_frame=start_frame,
-                dtype=dtype,
-                actions=actions,
+        if actions is not None:
+            new_actions = torch.zeros(
+                (
+                    actions.shape[0],
+                    total_frames - actions.shape[1],
+                    actions.shape[2],
+                ),
+                device=actions.device,
             )
+            new_actions[:, :, 3] = 1  # Set W for all the new frames (drive straight)
+            actions = torch.cat([actions, new_actions], dim=1)
+        else:
+            actions = None
 
-            # Update only the last frame
-            x[:, -1:] = x_pred[:, -1:]
-            """"
-            if noise_idx == 0:
-                visualize_step(
-                    x_curr=x_old[:, start_frame:],
-                    x_noisy=x[:, start_frame:],
-                    noise=x[:, start_frame:],
-                    v=v_pred,
-                    step=noise_idx,
-                    vae=vae,
+    with autocast("cuda", dtype=dtype):
+        # Prepare input frames
+        x = video[:, :n_prompt_frames]
+        # x = accelerator.prepare(x)
+        x = vae_encode(x, vae, n_prompt_frames)
+
+        max_noise_level = 1000
+        ddim_noise_steps = args.noise_steps
+        noise_range = torch.linspace(0, max_noise_level - 1, ddim_noise_steps + 1)
+        betas = sigmoid_beta_schedule(max_noise_level).float().to(accelerator.device)
+        alphas = 1.0 - betas
+        alphas_cumprod = torch.cumprod(alphas, dim=0)
+        alphas_cumprod = rearrange(alphas_cumprod, "T -> T 1 1 1")
+
+        for i in tqdm(range(n_prompt_frames, total_frames)):
+            chunk = torch.randn((B, 1, *x.shape[-3:]), device=x.device)
+            chunk = torch.clamp(chunk, -noise_abs_max, +noise_abs_max)
+            x = torch.cat([x, chunk], dim=1)
+            start_frame = max(0, i + 1 - model.max_frames)
+            # x_old = x.clone()
+            for noise_idx in reversed(range(0, ddim_noise_steps + 1)):
+                x_pred, v_pred = denoise_step(
+                    dit_model=model,
+                    x_noisy=x,
+                    noise_idx=noise_idx,
+                    stabilization_level=stabilization_level,
+                    noise_range=noise_range,
                     alphas_cumprod=alphas_cumprod,
-                    pred=x[:, start_frame:],
-                    scaling_factor=0.07843137255,
-                    name=f"frame_{i}",
+                    start_frame=start_frame,
+                    dtype=dtype,
+                    actions=actions,
                 )
-            """
 
-    # Decode and save video
-    x = rearrange(x, "b t c h w -> (b t) (h w) c")
-    # print(x)
-    with torch.no_grad(), autocast("cuda", dtype=torch.bfloat16):
+                # Update only the last frame
+                x[:, -1:] = x_pred[:, -1:]
+                """"
+                if noise_idx == 0:
+                    visualize_step(
+                        x_curr=x_old[:, start_frame:],
+                        x_noisy=x[:, start_frame:],
+                        noise=x[:, start_frame:],
+                        v=v_pred,
+                        step=noise_idx,
+                        vae=vae,
+                        alphas_cumprod=alphas_cumprod,
+                        pred=x[:, start_frame:],
+                        scaling_factor=0.07843137255,
+                        name=f"frame_{i}",
+                    )
+                """
+
+        # Decode and save video
+        x = rearrange(x, "b t c h w -> (b t) (h w) c")
+        # print(x)
+
         x = (vae.decode(x / 0.07843137255) + 1) / 2
-    x = rearrange(x, "(b t) c h w -> b t h w c", t=total_frames)
+        x = rearrange(x, "(b t) c h w -> b t h w c", t=total_frames)
 
     x = torch.clamp(x * 255, 0, 255).byte()
     # print(x)
@@ -226,5 +250,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-
-# accelerate launch --mixed_precision bf16 generate.py --total-frames 128 --dit_model_path checkpoints/dit_continue_epoch_9_660000.safetensors --noise_steps 100 --output_path video_100_4.mp4
