@@ -19,7 +19,7 @@
 
 
 A Deep Learning project that uses Diffusion transformers (DiT) to generate <img src="https://upload.wikimedia.org/wikipedia/de/7/74/GTA5-logo-o.svg" width="26" height="20"/> Grand Theft Auto V driving footage.
-This project is based on the  <img src="https://www.minecraft.net/content/dam/minecraftnet/games/minecraft/game-characters/MC-About_Key-Art_Gather_Resources_600x800.png" width="20" height="24" />[Open-Oasis Project](https://github.com/etched-ai/open-oasis)
+This project is based on the  <img src="https://upload.wikimedia.org/wikipedia/commons/9/91/Logo_Minecraft.png" width="20" height="20" />[Open-Oasis Project](https://github.com/etched-ai/open-oasis)
 
 <table>
 <tr>
