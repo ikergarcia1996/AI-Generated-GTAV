@@ -61,10 +61,33 @@ This project implements a diffusion-based video generation model trained on GTA 
 - Hugging Face Datasets
 - Wandb (for logging)
 
+## CUDA Linux & Windows
 ```bash
 pip install --upgrade torch torchvision transformers accelerate datasets einops wandb webdataset matplotlib timm 
 ```
+## ROCm Linux
+```bash
+pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2
+pip install --upgrade transformers accelerate datasets einops wandb webdataset matplotlib timm 
+```
+## ROCm Windows
+```bash
+pip install --upgrade install torch-directml torchvision torchaudio
+pip install --upgrade transformers accelerate datasets einops wandb webdataset matplotlib timm
+```
+### Example
+```bash
+import torch
+import torch_directml
+dml = torch_directml.device()
+tensor1 = torch.tensor([1]).to(dml)
+```
 
+## Intel Linux & Windows
+```bash
+pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/test/xpu
+pip install --upgrade transformers accelerate datasets einops wandb webdataset matplotlib timm 
+```
 
 # Running Inference
 
